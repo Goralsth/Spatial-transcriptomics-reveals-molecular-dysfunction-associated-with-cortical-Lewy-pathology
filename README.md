@@ -6,8 +6,9 @@
 
 MOUSE
 
-Create a file for storing all mouse GeoMx data and where to set up your r project: here named GeoMx_Mouse
+Create a file for storing all mouse GeoMx data and where to set up your r project: Here named GeoMx_Mouse
 GeoMx_Mouse/
+
 R.proj
 probe_data_mouse.rds
 ACA_Profile_.csv
@@ -20,8 +21,9 @@ Mos_Profile.csv
 
 HUMAN
 
-Create a file for storing all human GeoMx data and where to set up your r project: Heere called GeoMx_Hu
+Create a file for storing all human GeoMx data and where to set up your r project: Here called GeoMx_Hu
 GeoMx_Hu/
+
 R.proj
 probe_data_Hu.RDS
 Profile_human_allreg.csv_profileMatrix.csv
@@ -35,6 +37,7 @@ CosMx
 
 Create a file for storing all CosMx data and where to set up your r project: Here called CosMx
 CosMx/
+
 seurat_object_3mon.rds
 pSyn_positve_cells.csv
 cohort_3mon.rds
