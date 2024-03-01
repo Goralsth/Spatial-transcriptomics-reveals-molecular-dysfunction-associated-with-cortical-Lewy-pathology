@@ -1,0 +1,1331 @@
+---
+title: "Pipeline_For GeoMX_Data_Analysis"
+author: "Thomas Goralski"
+date: '2022-07-22'
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+This pipeline is intended for expedient analysis of raw data from Nanostring's GeoMx spatial transcriptomics platform.
+
+The following is adapted from the GeoMxTools package Vignettes, and "Spatial Data Analysis Report" from Daniel Newhouse on a data analysis contract. The following includes code/functions adapted from these, my own code, and combinations thereof.
+
+
+This code will walk through each of graphs in the figures of the publication Spatial Transcriptomics Reveals Molecular Dysfunction Associated with Cortical Lewy Pathology. Use this code to reproduce graphs in the figures that were produced using R for the mouse experiments.
+
+
+First use the Helper_functions_Pipeline_Hu_NatComms.RMD file to load in all the functions you will need for this pipeline. 
+
+
+To begin, We load in packages
+
+
+
+
+Now we load our packages
+```{r loading packages}
+#make list of all packages you will need
+
+library_list<- c( "NanoStringNCTools", "GeomxTools", "EnvStats", "ggiraph", "SpatialDecon", "reshape" , "reshape2", "knitr", "dplyr", "ggplot2",  "ggforce","cowplot", "scales", "umap", "Rtsne", "pheatmap", "ggrepel", "rentrez", "RColorBrewer", "Polychrome", "plyr",  "openxlsx", "psych", "kableExtra", "GGally", "magick", "circlize", "pals", "ggupset", "tidyr",  "ggprism", "Biobase", "FactoMineR", "svglite", "corrplot", "pheatmap", "ggcorrplot", "readr","qusage", "GSEABase", "org.Hs.eg.db", "ggvenn","ggVennDiagram","stringr", "readxl","writexl")
+
+#load in all libraries... Install all packages that error here
+get_libraries(library_list)
+
+#If you get an eror, there is no package called... Install that package
+```
+
+
+
+Establish Directories and folders
+```{r Create Directories}
+# # datadir is the location of dcc files, pkc file(s), and images (if applicable). Ensure these file are in working directory 
+ datadir<- getwd()
+
+
+# Initiate a date tag & directory naming
+date_tag <- format(Sys.Date(), "%Y%m%d")
+outdir <- paste0("output_", date_tag)
+object_dir <- file.path(outdir, "R_objects")
+qc_dir <- file.path(outdir, "qc")
+
+
+# Initialize output directory for static images, tables, and serialized R objects.
+dir.create(outdir, recursive = TRUE)  #output directory for results
+dir.create(object_dir, recursive = TRUE)  #directory with raw files
+dir.create(qc_dir, recursive = TRUE)   #QC output directory
+```
+
+
+
+
+First we load in the probe data. The "probe_data_Hu.RDS" file must be in the object directory created above. To find this folder after running the above code chunk, go to the working directory. Open the folder labeled "output_(today's date)". Then open the folder labeled "R_objects". The file needs to be in this folder. 
+
+
+
+
+```{r loading data}
+#First check if file exits
+if(file.exists(file.path(object_dir, "probe_data_Hu.RDS"))){
+  probe_data <- readRDS(file.path(object_dir, "probe_data_Hu.RDS"))
+} 
+
+
+
+
+```
+
+
+
+Next we specify features (genes) of interest, and ensure they are present in the dataset. In addition we identify annotation data that we want to visualize throughout QC (allows to check if specific parameters are causing problems with data), and ensure they are present in the data.
+```{r Select most important factors/ffeatures}
+
+
+foi <- c("Map2", "Rbfox3", "Itgam", "Adgre1", "Aif1", "Snca")   #specify genes ("features") of interest. 
+
+
+
+#enter the factors you'd like to track through QC from annotation data
+factors_of_interest <- c("segment", "Layer","Case","Diagnosis") #identify annotation data to track through QC
+
+#define factors of interest that are not of classs numeric for graphing purposes
+factors_of_interest_non_numeric<-c( "segment","Case","Diagnosis")
+#assign factor to color sankey plot by
+sankey_focal_factor <- factors_of_interest[1]    #color by segment
+
+
+gene_detection_rate_color_by<- "segment"
+
+
+
+allow_list <- c(foi)
+
+
+if(any(!factors_of_interest %in% colnames(pData(probe_data)))) {              #check if factors are present in data
+ facs_not_found <- factors_of_interest[!factors_of_interest %in% colnames(pData(probe_data))]
+ facs_not_found_msg <- paste0("Some factors of interest were not found, please check the ",
+               "following features to ensure they are correctly entered: ",
+               facs_not_found, ".")
+ factors_of_interest <- factors_of_interest[factors_of_interest %in% colnames(pData(probe_data))]
+}
+# Stop if the focal factor for sankey was not present (e.g., removed in above logic)
+if(!sankey_focal_factor %in% factors_of_interest){
+  stop("The Sankey focal factor is not present in factors_of_interest.")
+}
+```
+
+
+SPecify parameters for the data table reports on QC metrics
+```{r Set datable Parameters}
+#specifc paramters for data tbale outputs from QC analysis
+dt_params = 
+   list(dom = "lfBtip",
+        buttons = list(list(extend = "copy"),
+                       list(extend = "csv", filename = "ExampleDataSummary.csv"),
+                       list(extend = "excel", filename = "ExampleDataSummary.xlsx")),
+        autoWidth = TRUE,
+        searching = TRUE,
+        scrollX = TRUE,
+        pagingType = "simple",
+        scrollCollapse = TRUE,
+        fixedColumns = list(leftColumns = 1))
+
+```
+
+
+
+Specify specific QC thresholds. For reproduction of graphs from figures in the manuscript, run the metrics as is written.  
+```{r Set QC Parameters}
+#specifcy QC parameters
+QC_params <- list(
+  minSegmentReads = 1000, # segment QC thresholds
+  percentTrimmed = 80,
+  percentStitched = 80,
+  percentAligned = 75,
+  percentSaturation = 65,
+  minNegativeCount = 0.1,
+  maxNTCCount = 9000,
+  minNuclei = 4,
+  minArea = 100,
+  minProbeCount = 10, # probe QC thresholds
+  minProbeRatio = 0.1,
+  outlierTestAlpha = 0.01,
+  percentFailGrubbs = 20,
+  loqCutoff = 1,
+  highCountCutoff = 10000
+)
+
+
+loq_feature_filter_proportion <- 0.10 # feature needs to be in at least this proportion of samples globally
+loq_segment_filter_proportion <- 0.03 # Remove samples with low proportion of features above LOQ
+
+#specify column name from pData in probe data file that determines segmentation strategy
+index<-which(colnames(pData(probe_data))=="segment")
+segment<- colnames(pData(probe_data))[index]
+```
+
+
+
+
+
+
+
+Below we get our QC report.
+All plots will be automatically saved to your directory paths in their relevant folder(s). In addition, relevant plots will be printed here. The function has saved the normalized data "target_data" to your "R_objects" directory
+
+
+
+
+This will produce the Sankey Plot in Fig 1e 
+in a file called "SanKey_afterQC.svg" in the "QC" directory inside your output directory. 
+It will also produce the figures in supplemental figure 3. 
+```{r run QC}
+
+run_qc(Dataset = probe_data[,], Parameters = QC_params, segment_id = segment)
+
+
+```
+
+
+
+
+
+Read in the normalized data and visualize it
+```{r Read in Normalized Data}
+
+
+#reading normalized data
+target_data<-readRDS(file.path(object_dir, "target_data.RDS"))
+
+
+
+```
+
+Subset out any non-relevant samples
+```{r}
+
+rel_vec<-c("01-52","07-39","14-12","16-15","16-39","18-12","18-14","18-65")
+
+rel_ind<-which(target_data@phenoData@data$Case %in% rel_vec)
+target_data<-target_data[,rel_ind]
+
+```
+
+
+
+Now get Fig 1.f
+PCA
+```{r}
+#make dataset with each AOI as rownames, each gene,and pdata as columns
+PCA_data<-t(assayDataElement(object = target_data, elt = "log_q"))
+
+PCA_data<- cbind.data.frame(target_data@phenoData@data$Case ,target_data@phenoData@data$Layer, target_data@phenoData@data$slide_name,target_data@phenoData@data$segment,target_data@phenoData@data$Diagnosis,target_data@phenoData@data$Gender,target_data@phenoData@data$Age,target_data@phenoData@data$PMI,target_data@phenoData@data$MMSE,target_data@phenoData@data$Motor_UPDRS_On,target_data@phenoData@data$Motor_UPDRS_Off,target_data@phenoData@data$ApoE,PCA_data )
+
+#create vector of names of the pData you want in PCA. Order them quantitative, then qualitative
+pca_colnames<-c("Case" ,"layer", "slide_name","segment","Diagnosis", "Gender", "Age", "PMI","MMSE","Motor_UPDRS_On", "Motor_UPDRS_Off","APOE" )
+
+#place column names
+colnames(PCA_data)[1:length(pca_colnames)]<-pca_colnames
+
+
+#label order
+quantitative_factors<-c(7:8)
+
+qualitative_factors<-c(1:6,9:12)
+
+
+
+target_PCA<-FactoMineR::PCA(X= PCA_data, 
+                ncp=10,                #number of principle components to keep in dataset
+                scale.unit = TRUE,   #scales based on z-score... important for PCA, leave true
+                ind.sup= NULL,
+                quanti.sup=NULL,    #vector of the indexes of pheno data that is quantitative
+                quali.sup = qualitative_factors ,     #vector of indexes of the pheno data that is qualitative
+                row.w= NULL,         # weights for rows
+                col.w= NULL,         # weights for columns
+                graph=FALSE,         #whether graph should be auto displayed
+                axes= c(1,2)         # which components to display
+                  )
+
+```
+
+
+
+
+Define Directories
+
+```{r}
+PCA_plot_dir <-file.path(outdir, "PCA", "Plots")
+PCA_data_dir <- file.path(outdir, "PCA", "Data")
+dir.create(PCA_plot_dir,recursive = TRUE)
+dir.create(PCA_data_dir, recursive = TRUE) 
+```
+
+
+
+```{r}
+ind_pca<-target_PCA[["ind"]][["coord"]]
+
+
+
+target_sub_pca<-target_data
+
+p <- ggplot(data=target_sub_pca@phenoData@data, 
+            aes(x=ind_pca[,1], y=ind_pca[,3])) +
+            geom_point(aes(color=target_sub_pca@phenoData@data$segment,
+                        shape=Layer), alpha=0.5, size=0.2) + 
+            labs(x=paste0("PCA 1 (", round(target_PCA$eig[1,2]), "%)"), 
+            y=paste0("PCA (", round(target_PCA$eig[3,2]), "%)"),
+                        title="PCA") +
+            theme_bw(base_size=2) +
+            theme(legend.position = "right",  
+                  legend.text = element_text( size = 1.5),
+                  plot.background = element_blank(),
+                  panel.grid.major = element_blank(),
+                  panel.grid.minor = element_blank(),
+                  )+
+  scale_color_manual(values = c("NeuN"="dodgerblue2",
+                               "pSyn"= "firebrick1"))
+ 
+  p
+```
+
+
+now lets get Fig 1g
+```{r}
+
+NeuN_ind<-which(target_data@phenoData@data$segment=="NeuN")
+marker_data<-target_data[,NeuN_ind]
+marker_data<-marker_data[,order(marker_data@phenoData@data$Layer)]
+
+
+layer_markers_hu<- c("IGSF11", "KCNIP2", "RASGRF2", "SYT17", "WFS1", "C1QL2", "CUX2", "CBLN2", "CCK", "FXYD6", "CACNA1E", "CRYM", "COL6A1", "SYT2", "LGALS1", "MFGE8", "SNCG", "RORB", "TOX", "VAT1L", "B3GALT2", "PCP4", "RPRM", "RXFP1", "SYT10", "TLE4", "SEMA3C", "SYNPR")
+
+
+genes_indnocon<-rownames(marker_data@assayData$log_q[,]) %in% layer_markers_hu
+
+
+annots<-marker_data@phenoData@data[,]
+
+annots<-annots[,c(3,13)]
+
+ann_colors<- list(
+  layer= c("5"="greenyellow","6"="mediumorchid1","2/3"="lightcyan2", 	
+"ND"="sandybrown")
+) 
+
+color_pal<-(colorRampPalette(c("#0092b5", "white", "#a6ce39"))(121))
+
+
+marker_data<-marker_data[genes_indnocon,]
+marker_data<-marker_data[layer_markers_hu,]
+
+p<-pheatmap(marker_data@assayData$log_q[,],
+            scale = "row", 
+        show_rownames = TRUE, show_colnames = FALSE,
+          border_color = NA,
+          clustering_method = "average",
+          cluster_rows = FALSE,
+         cluster_cols = FALSE,
+          clustering_distance_cols = "correlation",
+   annotation_col = annots,
+annotation_colors = ann_colors,
+ #breaks = seq(min, 6 , 0.2) ,
+         color = color_pal,
+fontsize_row=5,
+fontsize=5,
+treeheight_row=10,
+treeheight_col=25
+)
+
+
+
+de_plot_dir <-file.path(outdir, "DE", "Plots")
+de_data_dir <- file.path(outdir, "DE", "Data")
+dir.create(de_plot_dir,recursive = TRUE)
+dir.create(de_data_dir, recursive = TRUE)
+
+ggsave("Heatmap_zengLayer_nocon.pdf",plot=p, width = 14, height = 14, units = "cm",path = de_plot_dir)
+
+
+
+```
+
+
+
+
+
+
+Lets get Fig 2a.
+
+This requires a few extra functions to be defined. 
+
+In this analysis we save log2 fold change estimates and P-values across all levels in the factor of interest. We also apply a Benjamini-Hochberg multiple test correction.
+
+```{r define fomrat for LMM results}
+formatLMMResults <- function(lmm_results, p_adjust_method="fdr") {
+ if(!inherits(lmm_results, "matrix")){
+  stop("lmm_results needs be a matrix, See ?GeomxTools::mixedModelDE.")
+ }
+ if(!all(c("anova", "lsmeans") %in% rownames(lmm_results))){
+  stop("Expected row names of lmm_results to have anova and lsmeans.")
+ }
+ df <- do.call(rbind, lmm_results["lsmeans", ])
+ contrasts <- rownames(df)
+
+ # Make sure there are not multiple " - " present in contrasts
+ for(i in unique(contrasts)){
+   if(length(strsplit(i, split=" - ")[[1]])>2){
+     stop(paste0("Contrast \'", i, "\' has more than two split points. Please rename contrasts first."))
+   }
+ }
+ # Contrast are of the for B - A. Convert to comparisons of the form
+ # A vs B.
+ df <- as.data.frame(df)
+ contrast_pairs <- strsplit(contrasts, split=" - ")
+ df$Comparison <- paste0(unlist(lapply(contrast_pairs, "[[", 2L)), " vs ", unlist(lapply(contrast_pairs, "[[", 1L)))
+ colnames(df)[which(names(df) == "Pr(>|t|)")] <- "P"
+ row.names(df) <- NULL
+
+ # Add feature names
+ df$Feature <- rep(colnames(lmm_results), each=nrow(lmm_results["lsmeans",][[1]]))
+
+ # P-adjustment based on subsets of data faceted by Comparison
+ df <- ddply(df, .(Comparison), function(x){
+   x$padj <- p.adjust(x$P, method = p_adjust_method)
+   return(x)
+ })
+ df <- df[, c("Feature", "Comparison", "Estimate","P", "padj")]
+ colnames(df)[colnames(df)=="padj"] <- toupper(p_adjust_method) # 'FDR' used in standard Report
+
+
+ return(df)
+}
+```
+
+
+
+
+
+Now we run the analysis and plot the graph
+
+ 
+ 
+ 
+ 
+```{r}
+
+
+# convert test variables to factors
+pData(target_data)$testRegion <- 
+    factor(pData(target_data)$segment, c("pSyn", "NeuN"))
+
+vec<-unique(target_data@phenoData@data$Case)
+pData(target_data)[["random"]] <- 
+    factor(pData(target_data)$Case, c(vec))
+
+vec<-unique(target_data@phenoData@data$Layer)
+pData(target_data)[["layer"]] <- 
+    factor(pData(target_data)$Layer, c(vec))
+
+
+
+
+
+
+
+mixedOutmc <-
+        mixedModelDE(target_data,
+                     elt = "log_q",
+                     modelFormula = ~ testRegion  + (1 + testRegion|random),
+                     groupVar = "testRegion",
+                     nCores = parallel::detectCores()-1,
+                     multiCore = TRUE)
+    
+    # format results as data.frame
+    results30<-formatLMMResults(mixedOutmc)
+   
+  #make gene nmae column
+    results30$Gene<-results30$Feature  
+   
+ 
+  #remove negative probe
+    ind<-which(results30$Gene=="NegProbe-WTX")
+     results30<-results30[-ind,]
+    
+    
+results30$Color[results30$P < 0.05 & results30$Estimate>0] <- "Enriched in pSyn P < 0.05"
+results30$Color[results30$P < 0.05 & results30$Estimate<0] <- "Enriched in NeuN P < 0.05"
+
+results30$Color[results30$FDR < 0.05 & results30$Estimate>0] <- "Enriched in pSyn FDR < 0.05"
+results30$Color[results30$FDR < 0.05 & results30$Estimate<0] <- "Enriched in NeuN FDR < 0.05"
+
+
+results30$Color[results30$FDR < 0.01 & results30$Estimate>0 ] <- "Enriched in pSyn FDR < 0.01"
+results30$Color[results30$FDR < 0.01 & results30$Estimate<0 ] <- "Enriched in NeuN FDR < 0.01"
+
+results30$Color[abs(results30$Estimate) < 0.5] <- "NS or FC < 0.5"
+
+
+results30$Color <- factor(results30$Color,
+                        levels = c("NS or FC < 0.5" , "Enriched in pSyn FDR < 0.05", "Enriched in NeuN FDR < 0.05","Enriched in pSyn P < 0.05", "Enriched in NeuN P < 0.05", "Enriched in pSyn FDR < 0.01", "Enriched in NeuN FDR < 0.01" ))
+
+# pick top genes for either side of volcano to label
+# order genes for convenience:
+results30$invert_P <- (-log10(results30$P)) * sign(results30$Estimate)
+
+
+```
+
+Get the heatmap
+```{r}
+sig_genes_psyn<-which(results30$Color=="Enriched in pSyn FDR < 0.01")
+sig_genes_NeuN<-which(results30$Color=="Enriched in NeuN FDR < 0.01")
+sig_genes<-c(sig_genes_NeuN,sig_genes_psyn)
+
+de_heat_dat_noSub<-target_data[sig_genes,]
+
+annots<-de_heat_dat_noSub@phenoData@data[,]
+annots<-annots[,c(3,4,11,13, 16)]
+
+ann_colors<- list(
+  segment= c(NeuN="steelblue1", pSyn="firebrick1"),
+  Layer= c("5"="greenyellow","6"="mediumorchid1","2/3"="magenta2" 	
+)
+ 
+) 
+
+max<-max(target_data@assayData$log_q)
+min<-min(target_data@assayData$log_q)
+
+color_pal<-(colorRampPalette(c("#0092b5", "white", "#a6ce39"))(121))
+
+heat_dat_maxmin<-de_heat_dat_noSub@assayData$log_q
+
+p<-pheatmap(heat_dat_maxmin[,], 
+scale = "row", 
+        show_rownames = TRUE, show_colnames = FALSE,
+          border_color = NA,
+          clustering_method = "average",
+          cluster_rows = TRUE,
+         cluster_cols = TRUE,
+          clustering_distance_cols = "correlation",
+   annotation_col = annots,
+annotation_colors = ann_colors,
+ #breaks = seq(min, 6 , 0.2) ,
+         color = color_pal,
+fontsize_row=1
+)
+
+ggsave("Heatmap_FDR0.01_noSub_Hu.pdf",plot=p, width = 14, height = 14, units = "cm")
+
+
+```
+
+
+
+
+now lets get figure 2 b
+
+```{r}
+top_g <- c()
+
+
+
+top_gene1<-results30[, 'Gene'][order(results30[, 'invert_P'], decreasing = TRUE)[1:15]]
+top_gene2<-results30[, 'Gene'][order(results30[, 'invert_P'], decreasing = FALSE)[1:15]]
+   
+top_g<-c(top_gene1,top_gene2)
+
+top_g <- unique(top_g)
+
+highlight_top_g<-subset(results30, Gene %in% top_g & P<0.05 &  Color != "NS or FC < 0.5")
+
+# Graph results30
+diff_exp3<-ggplot(results30,
+       aes(x = Estimate, y = -log10(`P`),
+           color = Color, label = Gene)) +
+    geom_vline(xintercept = c(0.5, -0.5), lty = "dashed", size=0.2) +
+    geom_hline(yintercept = -log10(0.05), lty = "dashed", size=0.2) +
+    geom_point(size=0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001, alpha=0.3) +
+    labs(x = "log2(FC)",
+         y = "Significance, -log10(P)",
+         color = "Key") +
+    scale_color_manual(values = c(`Enriched in pSyn FDR < 0.01`= "firebrick1",
+                                  `Enriched in pSyn FDR < 0.05` = "rosybrown2",
+                                  `Enriched in pSyn P < 0.05` = "rosybrown3",
+                                  `Enriched in NeuN FDR < 0.01` = "dodgerblue2",
+                                  `Enriched in NeuN FDR < 0.05` = "slategray2",
+                                  `Enriched in NeuN P < 0.05` = "slategray3",
+                                  #`P < 0.05` = "orange2",
+                                  `NS or FC < 0.5` = "gray"),
+                                  guide = guide_legend(override.aes = list(size = 0.5))) +
+    scale_y_continuous(expand = expansion(mult = c(0,0.05))) +
+    geom_text_repel(data = subset(results30, Gene %in% top_g & P<0.05 & Color != "NS or FC < 0.5"),
+                    size = 1.5, point.padding = 0.1, color = "black",
+                    min.segment.length = .3, box.padding = .1, lwd = .2,
+                    max.overlaps = 50, segment.size=0.05, force = 10, max.time = 3) +
+    theme_bw(base_size = 6) +
+  theme(axis.line = element_line(color='black'),
+    plot.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank())+
+    theme(legend.position = "bottom",
+          legend.key.size= unit(0.00001, 'cm'),
+          legend.title = element_text(size = 2),
+          legend.text = element_text(size=2),
+          legend.key.height = unit(0.3, 'cm'),
+          legend.key.width = unit(3, 'cm')) +
+  geom_point(data=highlight_top_g, alpha=0.9, size=0.5)
+
+ diff_exp3
+ 
+ 
+ 
+    
+ggsave("volc_all.png", width = 6, height = 8, units = "cm",path = de_plot_dir)
+ggsave("volc_all.pdf", width = 6, height = 8, units = "cm",path = de_plot_dir)
+    
+    
+
+```
+
+
+
+Lets get fig 2c
+
+```{r}
+
+top_g<- c("SYNGR1","GRIN1", "GRIA2", "SYNGAP1", "KCNT1", "NDUFV3", "NDUFA10", "SDHA", "SORT1", "CTSB", "PSMD8", "PSMD8", "PSMD1", "HERC4", "UBE2Z", "UBE2D1", "POLK", "TOP3A", "PDCD4", "AIFM1", "GADD45A", "KIF5A", "SEPTIN5", "C4BPB", "IL12RB2")
+
+top_g<-str_to_upper(top_g)
+
+#begin violin plotting
+prop<-target_data@assayData$log_q[,]
+annots<-target_data@phenoData@data
+
+violin_df <- cbind(annots %>% dplyr::select(eval(segment)),
+                  t(prop))
+violin_df <- violin_df %>% tidyr::pivot_longer(cols=-c(1,2), names_to = "Feature", values_to = "Expression")
+
+violin_p_df <- filter(results30, Feature %in% top_g) 
+violin_p_df <- violin_p_df %>% tidyr::separate(col = Comparison, into=c("group1", "group2"), sep=" vs ")
+violin_p_df$FDR <- signif(violin_p_df$FDR, 3)
+violin_p_df$P <- signif(violin_p_df$P, 3)
+violin_exp_max <- ddply(violin_df, .(Feature), summarize,
+                        y.position=(max(Expression)*1.1)) # +1 for safe log2
+violin_p_df <- base::merge(violin_p_df, violin_exp_max, by="Feature")
+
+violin_df<-base::merge(violin_p_df, violin_df, by="Feature")
+
+violin_df$FDR<-signif(violin_df$FDR, 3)
+
+p <- ggplot(violin_df, 
+            aes(x=segment, y=Expression, fill=segment)) + 
+  geom_violin(alpha=0.2, position = position_dodge(0.8), color = NA) +
+  geom_jitter(width=0.1, height=0, size = 0.5, color="grey49") + 
+  scale_fill_manual(values = c("blue", "red", "grey")) +
+  facet_wrap(~Feature, scales = "free_y") +
+  labs(x = eval(segment), y = "Expression (log q3 normalized counts)") +
+  scale_y_continuous(expand = expansion(mult = 0.2)) +
+  #expand_limits(y=0)+
+  theme_bw(base_size = 14) +
+  theme( plot.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank())+
+  guides(fill=guide_legend(title = eval(segment)))
+
+p <- p + ggprism::add_pvalue(
+  violin_p_df,
+  label="FDR = {FDR}", label.size = 2.6,
+  y.position = violin_p_df$y.position
+) + theme(legend.position="bottom")
+
+
+p
+
+ggsave("Violins.png", p,  width = 50, height = 30, units = "cm",path = de_plot_dir)
+ggsave("Violins.pdf", p,  width = 15, height = 10, units = "cm",path = de_plot_dir)
+ggsave("Violins.pdf", p,  width = 18, height = 22, units = "cm")
+
+```
+
+
+Now lets get figure 5b.
+```{r}
+
+
+gsea_plot_dir <-file.path(outdir, "GSEA", "Plots")
+gsea_data_dir <- file.path(outdir, "GSEA", "Data")
+dir.create(gsea_plot_dir,recursive = TRUE)
+dir.create(gsea_data_dir, recursive = TRUE) 
+
+
+#Make sure GMT files are in the GSEA dir you just created
+
+geneSet_data <- geneSetAnalysis(object = target_data,
+                                 elt = "log_q",
+                                 geneSet = GSEA_plot_dir,
+                                 convertFrom = "ENTREZID",
+                                 species = "Hs",
+                                 minSize = 5,
+                                 maxSize = 500,
+                                 db = "org.Hs.eg.db")
+
+
+
+
+geneSetDE_contrast1<-
+        mixedModelDE(geneSet_data,
+                     modelFormula = ~ testRegion + (1|random),
+                     groupVar = "testRegion",
+                     nCores = parallel::detectCores()-1,
+                     multiCore = TRUE)
+
+geneSet_results_contrast1 <- formatLMMResults(geneSetDE_contrast1)
+
+
+strings <- do.call(rbind, strsplit(unique(geneSet_results_contrast1$Comparison), split=" vs "))
+
+
+top_feat<-c()
+top_feat<- getTopFeatures(geneSet_results_contrast1, n_features = 50,
+                            est_thr = 0.5, fdr_thr = 0.001)
+saveRDS(top_feat,"top_genesets_human")
+
+#make sure the top genesets mouse is in your working directory folder
+top_feat_mouse<-readRDS("top_genesets_mouse")
+top_feat_human<-top_feat
+
+
+#now check if any don't match directionalility  between mouse and human
+all_mouse<-unlist(top_feat_mouse[3])
+
+all_human<-unlist(top_feat_human[3])
+
+conserved_all<-all_human %in% all_mouse
+
+
+conserved_all_list<-all_human[conserved_all]
+
+
+geneset_ind<-c()
+for (i in conserved_all_list){
+  geneset_sub<-which(geneSet_data@featureData@data$GeneSet==i)
+  geneset_ind<-c(geneset_sub,geneset_ind)
+}
+
+
+annots<-geneSet_data@phenoData@data
+
+annots<-annots[,c(16,34)]
+
+ann_colors<- list(
+  segment= c(NeuN="steelblue1", pSyn="firebrick1"),
+  layer= c("5"="greenyellow","6"="mediumorchid1","2/3"="sandybrown")
+) 
+
+heatmap_geneset<-geneSet_data@assayData$ssgsea
+
+
+label_ge1 <- unique(top_feat$all)
+
+
+heatmap_geneset<-geneSet_data@assayData$ssgsea
+
+#changing clustering apporach may imporve seperation of segments
+p<-pheatmap(heatmap_geneset[geneset_ind,],
+            scale = "row", 
+        show_rownames = TRUE, show_colnames = FALSE,
+          border_color = NA,
+          clustering_method = "average",
+          cluster_rows = TRUE,
+         cluster_cols = TRUE,
+          clustering_distance_cols = "correlation",
+   annotation_col = annots,
+annotation_colors = ann_colors,
+ #breaks = seq(min, 6 , 0.2) ,
+         color = color_pal,
+fontsize_row=5,
+fontsize=5,
+treeheight_row=10,
+treeheight_col=25
+)
+
+ggsave("Heatmap_Genesets_Of_Interest_Conserved.pdf",plot=p,  width = 14, height = 7, units = "cm")
+
+
+
+
+
+```
+
+figure 5d
+```{r}
+top_g<-c("Cux2", "Deptor", "Rorb", "Cox5a", "Ndufa10", "Nrxn1", "Snap25", "Dnm1", "Atp6ap2", "Ctsb", "Uba1","USP38", "Usp42", "Pink1", "Lrrk2", "Mapt", "Snca", "Bad", "Casp9", "H2ax", "Nefl", "Septin7", "Tubb4b", "Pak6", "Pde2a")
+
+top_g<-str_to_upper(top_g)
+
+
+#begin violin plotting
+prop<-target_data@assayData$log_q
+annots<-target_data@phenoData@data
+
+violin_df <- cbind(annots %>% dplyr::select(eval(segment)),
+                  t(prop))
+violin_df <- violin_df %>% tidyr::pivot_longer(cols=-c(1,2), names_to = "Feature", values_to = "Expression")
+violin_p_df <- filter(results30, Feature %in% top_g)  
+violin_p_df <- violin_p_df %>% tidyr::separate(col = Comparison, into=c("group1", "group2"), sep=" vs ")
+violin_p_df$FDR <- signif(violin_p_df$FDR, 3)
+violin_p_df$P <- signif(violin_p_df$P, 3)
+
+violin_exp_max <- ddply(violin_df, .(Feature), summarize,
+                        y.position=(max(Expression)*1.1)) # +1 for safe log2
+violin_p_df <- base::merge(violin_p_df, violin_exp_max, by="Feature")
+
+violin_df<-base::merge(violin_p_df, violin_df, by="Feature")
+
+violin_df$FDR<-signif(violin_df$FDR, 3)
+
+p <- ggplot(violin_df, 
+            aes(x=segment, y=Expression, fill=segment)) + 
+  geom_violin(alpha=0.2, position = position_dodge(0.8), color = NA) +
+  geom_jitter(width=0.1, height=0, size = 0.5, color="grey49") + 
+  scale_fill_manual(values = c("blue", "red", "grey")) +
+  facet_wrap(~Feature, scales = "free_y") +
+  labs(x = eval(segment), y = "Expression (log q3 normalized counts)") +
+  scale_y_continuous(expand = expansion(mult = 0.2)) +
+  #expand_limits(y=0)+
+  theme_bw(base_size = 14) +
+  theme( plot.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank())+
+  guides(fill=guide_legend(title = eval(segment)))
+
+p <- p + ggprism::add_pvalue(
+  violin_p_df,
+  label="FDR = {FDR}", label.size = 2.6,
+  y.position = violin_p_df$y.position
+) + theme(legend.position="bottom")
+
+
+p
+
+ggsave("Violins_conserved.png", p,  width = 50, height = 30, units = "cm",path = de_plot_dir)
+ggsave("Violins_conserved.pdf", p,  width = 18, height = 22, units = "cm")
+
+```
+
+
+Fig 5f
+```{r}
+goi<-c("GBA", "VPS35", "SYNJ1", "DNAJC6", "PINK1", "ATP13A2","Park7", "SNCA", "UCHL1", "TMEM230", "GIGYF2", "DNAJC13","PLA2G6", "LRRK2", "HTRA2", "POLG", "EIF4G1")
+goi<-str_to_upper(goi)
+
+
+de_heat_dat_noSub<-target_data
+de_heat_dat_noSub<-de_heat_dat_noSub[,order(de_heat_dat_noSub@phenoData@data$segment, decreasing = TRUE)]
+
+
+
+annots<-de_heat_dat_noSub@phenoData@data[,]
+annots<-annots[,c(16,3,11)]
+
+ann_colors<- list(
+  segment= c(NeuN="steelblue1", pSyn="firebrick1"),
+  layer= c("5"="greenyellow","6"="mediumorchid1","2/3"="lightcyan2", 	
+"ND"="sandybrown")
+ 
+) 
+
+max<-max(target_data@assayData$log_q)
+min<-min(target_data@assayData$log_q)
+
+color_pal<-(colorRampPalette(c("#0092b5", "white", "#a6ce39"))(121))
+
+heat_dat_maxmin<-de_heat_dat_noSub@assayData$log_q
+
+goi_ind<-rownames(heat_dat_maxmin) %in% goi
+
+
+p<-pheatmap(heat_dat_maxmin[goi_ind,], 
+scale = "row", 
+        show_rownames = TRUE, show_colnames = FALSE,
+          border_color = NA,
+          clustering_method = "average",
+          cluster_rows = TRUE,
+         cluster_cols = FALSE,
+          clustering_distance_cols = "correlation",
+   annotation_col = annots,
+annotation_colors = ann_colors,
+ #breaks = seq(min, 6 , 0.2) ,
+         color = color_pal,
+fontsize_row=5,
+fontsize=6,
+treeheight_row=10
+)
+
+ggsave("Heatmap_Hu_PD_RiskGenes.pdf",plot=p, width = 8.5, height = 4.2, units = "cm")
+
+
+
+
+```
+
+
+
+
+Supplemental figure 5
+
+
+```{r}
+
+top_feat<-c()
+top_feat<- getTopFeatures(geneSet_results_contrast1, n_features = 30,
+                            est_thr = 0.5, fdr_thr = 0.001)
+
+
+
+annots<-geneSet_data@phenoData@data
+
+annots<-annots[,c(16,34)]
+
+ann_colors<- list(
+  segment= c(NeuN="steelblue1", pSyn="firebrick1"),
+  layer= c("5"="greenyellow","6"="mediumorchid1","2/3"="sandybrown")
+) 
+
+heatmap_geneset<-geneSet_data@assayData$ssgsea
+
+
+label_ge1 <- unique(top_feat$all)
+
+
+heatmap_geneset<-geneSet_data@assayData$ssgsea
+
+#changing clustering apporach may imporve seperation of segments
+p<-pheatmap(heatmap_geneset[label_ge1,],
+            scale = "row", 
+        show_rownames = TRUE, show_colnames = FALSE,
+          border_color = NA,
+          clustering_method = "average",
+          cluster_rows = TRUE,
+         cluster_cols = TRUE,
+          clustering_distance_cols = "correlation",
+   annotation_col = annots,
+annotation_colors = ann_colors,
+ #breaks = seq(min, 6 , 0.2) ,
+         color = color_pal,
+fontsize_row=5,
+fontsize=5,
+treeheight_row=10,
+treeheight_col=25
+)
+
+ggsave("Heatmap_Hu_top.pdf",plot=p,  width = 16, height = 12, units = "cm")
+
+
+```
+
+
+
+
+Supplemental Figure 12
+
+```{r}
+
+
+norm<-target_data@assayData$q_norm
+
+nuc_count<-target_data@phenoData@data$AOINucleiCount
+
+bg = derive_GeoMx_background(norm = target_data@assayData$q_norm, 
+                             probepool = fData(target_data)$Module,   
+negnames = "NegProbe-WTX")
+
+#import profle marix
+#profile_matrix<-read_csv("./Profile_Matrix/Human_Profile.csv")
+profile_matrix <- read_csv("Profile_human_allreg.csv_profileMatrix.csv")
+#remove non nuerons
+profile_matrix<-profile_matrix[,-c(6,7,15,17,18)]
+rowname<-profile_matrix$...1
+rowname<-toupper(rowname)
+profile_matrix<-profile_matrix[,-1]
+profile_matrix<-as.matrix(profile_matrix)
+rownames(profile_matrix)<-rowname
+
+
+res = spatialdecon(norm = norm,#normalized data matrix       #background use bg2
+                   bg=bg,
+                   X = profile_matrix,   #profile matrix
+                   align_genes = TRUE,
+                   cell_counts = nuc_count)
+
+
+```
+
+
+```{r}
+# convert test variables to factors
+pData(target_data)$testRegion <- 
+    factor(pData(target_data)$segment, c("pSyn", "NeuN"))
+
+
+
+vec<-unique(target_data@phenoData@data$Case)
+pData(target_data)[["random"]] <- 
+    factor(pData(target_data)$Case, c(vec))
+
+
+
+vec<-unique(target_data@phenoData@data$Layer)
+pData(target_data)[["layer"]] <- 
+    factor(pData(target_data)$Layer, c(vec))
+
+
+
+
+annots<-target_data@phenoData@data#[PD_ind,]
+prop<-res$prop_of_all
+prop <- prop[apply(prop, 1, sum)!=0,]
+colnames(prop)<-annots$segment
+melt_prop<-melt(prop)
+ 
+
+
+da_contrast1<-mixedDE(object=prop,
+      pdat=annots,
+      modelFormula = ~ testRegion + (1|random),
+      groupVar="testRegion",
+      nCores = parallel::detectCores()-1,
+      multiCore = TRUE)
+
+da_contrast1 <- formatLMMResults(da_contrast1)
+  
+#Begin Violin Plotting  
+violin_df <- cbind(annots %>% dplyr::select(`slide_name`, eval(segment)),
+                  t(prop))
+violin_df <- violin_df %>% tidyr::pivot_longer(cols=-c(1,2), names_to = "Feature", values_to = "Expression")
+
+violin_p_df <- da_contrast1
+violin_p_df <- violin_p_df %>% tidyr::separate(col = Comparison, into=c("group1", "group2"), sep=" vs ")
+violin_p_df$FDR <- signif(violin_p_df$FDR, 3)
+violin_p_df$P <- signif(violin_p_df$P, 3)
+violin_exp_max <- ddply(violin_df, .(Feature), summarize,
+                        y.position=(max(Expression)*1.1)) # +1 for safe log2
+violin_p_df <- base::merge(violin_p_df, violin_exp_max, by="Feature")
+
+# Cap at 16 unless top_features is >16
+if(nrow(da_contrast1)>16){
+  violin_p_df <- violin_p_df %>% filter(Feature %in% label_da_contrast1$all) %>% arrange(FDR) %>% head(16)
+  violin_df <- violin_df %>% filter(Feature %in% violin_p_df$Feature)
+}
+
+# Sort plot by P-value
+violin_p_df$Feature <- factor(violin_p_df$Feature, levels=arrange(violin_p_df, FDR)$Feature, order=TRUE)
+violin_df$Feature <- factor(violin_df$Feature, levels=levels(violin_p_df$Feature), order=TRUE)
+violin_df <- violin_df %>% as.data.frame(arrange(violin_df, Feature))
+ 
+
+p <- ggplot(violin_df, 
+            aes(x=segment, y=Expression, fill=segment)) + 
+ geom_violin(alpha=0.2, lwd=0.1, position = position_dodge(0.8), color = NA)+ 
+  # geom_jitter(aes(colour=slide), width=0.25, height=0, size = 1.5) +
+  geom_jitter(width=0.2, height=0, size = 0.3, color="gray49") + 
+ scale_fill_manual(values = c("blue", "red", "grey")) +
+  facet_wrap(~Feature, scales = "free_y") +
+  xlab(eval(segment)) +
+  ylab("Cell Abundance (Proportion)") + 
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.2))) +
+  theme_bw(base_size = 6) +
+  theme(legend.position = "bottom") +
+  theme( plot.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank())+
+  guides(fill=guide_legend(title = eval(segment)))
+
+p <- p + ggprism::add_pvalue(
+  violin_p_df,
+  label="FDR = {FDR}", label.size = 1.8, bracket.size = 0.3,
+  y.position = violin_p_df$y.position + violin_p_df$y.position*0.2
+)
+
+
+
+decon_plot_dir <-file.path(outdir, "Decon", "Plots")
+decon_data_dir <- file.path(outdir, "Decon", "Data")
+dir.create(decon_plot_dir,recursive = TRUE)
+dir.create(decon_data_dir, recursive = TRUE)
+
+
+saveRDS(p, file=file.path(decon_data_dir, "Decon_All_Violins.RDS"))
+ ggsave("Decon_All_Violins.pdf", p,  width = 15, height = 10, units = "cm",path = decon_plot_dir)
+
+p  
+
+```
+
+
+
+Supplemntal figure 18A
+
+```{r}
+cell_types<- c("CUX2","EPHA6","RASGRF2","TMEM178B","CA10","FAM19A1","RFX3","KCTD16","KIRREL3","NTRK3","IL1RAPL1","LRRTM4","SYN3","CUX1","THSD7A","CAMK2A","PRKCA","PAM","SIPA1L1","TMEM108","RGS6","PTK2B","MAPK4","CACNA2D1","RORB","PTPRT","CNTN5","UNC5D","KCNC2","MEF2C","RUNX1T1","KCTD16","PTPRK","SHISA9","CDH9","TENM3","SLIT3","AK5","PCSK2","RGS12","TMEM132D","ERC2","KCTD16","ZNF804B","SORBS2","CUX1","LSAMP","NTNG2","MGAT5","UNC5C","GNG2","GALNT14","GNAO1","CACNA1E","CPNE5","CADPS2","SFMBT2","TENM4","SYNPR","CACNA1B","GNB4","KLHL1","GSG1L","SLC24A4","NR4A2","SYT1","GPD2","MBOAT2","ZNF804A","ENOX1","CPNE4","NBEA","SPOCK3","CHRM2","1-Mar","CACNA1C","DSCAML1","TMEM178B","GRIA4","TRPS1","TMEM163","OPRK1","ALCAM","TESC","PTPRU","ZEB2","HS3ST4","DLC1","TLE4","PITPNC1","PDZRN4","SLC35F1","SYT6","NRP1","MCTP1","GARNL3","PRKCB","ATP2B1","FOXP2","XKR4","KIAA1217","PCDH11X","1-Mar","FUT9","NRXN1","CDH10","NFIA","HS3ST4","EPHA5","DLC1","TNIK","TLE4","MDGA2","TENM1","SLC1A2","NFIB","PITPNC1","MCTP1","NR4A2","ACVR2A","RYR3","GAS7","SLC35F1","KCNMB4","PKP4","FRMPD4","MMP16","RAB3B","SLC8A1","GSG1L","VAT1L","GRIK2","ADRA1A","TMTC2","CDH20","FAM19A1","NRP1","NTNG1","LPP","SLIT2","SLC26A4","BCL11B","NEBL","ROBO2","ESRRG","PPARGC1A","NTM","RAB3C","FAM135B","STK39","SULF2","NFIB","ARL15","ANO4","EPHA6","DSCAML1","KCNN2","CHST8","SH3RF1","HTR4","HCN1","PEX5L","TCERG1L","POU3F1","TFDP2","FAM189A1","TOX2","GRIA3","ROBO1","FLT3","HDAC9","FRMD4A","RYR3","NAV1","CABP1","RAVER2","BCL6","DAB1","RAPGEF5","NEFH","GPRIN3","FAT3","SORCS2","FAM126A","NLGN1","TOX","FEZF2","NEFM","TRPC4","CTTNBP2","CDS1","GRAMD1B","PCGF5","ASAP1","WWOX","CACNA1H","TSHZ2","SORCS2","DAB1","KCNIP1","SPON1","GRM8","ETV1","ADCY2","KCNT2","VWC2L","PRR16","SATB1","OLFM3","C8orf34","SH3RF3","BCL11B","TLE4","MGAT4C","CAMK2D","CDH11","GRM3","PAK7","DCC","TOX","SASH1","CPNE4","CHSY3","STRBP","NETO2","SLC1A2","PCDH17","GRIA4")
+
+
+
+
+
+```
+
+```{r}
+# convert test variables to factors
+pData(target_data)$testRegion <- 
+    factor(pData(target_data)$segment, c("pSyn", "NeuN"))
+
+vec<-unique(target_data@phenoData@data$Case)
+pData(target_data)[["random"]] <- 
+    factor(pData(target_data)$Case, c(vec))
+
+vec<-unique(target_data@phenoData@data$Layer)
+pData(target_data)[["layer"]] <- 
+    factor(pData(target_data)$Layer, c(vec))
+
+
+ind<-which(rownames(target_data@assayData$log_q) %in% cell_types)
+
+
+
+
+mixedOutmc <-
+        mixedModelDE(target_data[ind,],
+                     elt = "log_q",
+                     modelFormula = ~ testRegion  + (1 + testRegion|random),
+                     groupVar = "testRegion",
+                     nCores = parallel::detectCores()-1,
+                     multiCore = TRUE)
+    
+    # format results as data.frame
+    results_cell<-formatLMMResults(mixedOutmc)
+   
+  #make gene nmae column
+    results_cell$Gene<-results_cell$Feature  
+   
+ 
+    
+    
+results_cell$Color[results_cell$P < 0.05 & results_cell$Estimate>0] <- "Enriched in pSyn P < 0.05"
+results_cell$Color[results_cell$P < 0.05 & results_cell$Estimate<0] <- "Enriched in NeuN P < 0.05"
+
+results_cell$Color[results_cell$FDR < 0.05 & results_cell$Estimate>0] <- "Enriched in pSyn FDR < 0.05"
+results_cell$Color[results_cell$FDR < 0.05 & results_cell$Estimate<0] <- "Enriched in NeuN FDR < 0.05"
+
+
+results_cell$Color[results_cell$FDR < 0.01 & results_cell$Estimate>0 ] <- "Enriched in pSyn FDR < 0.01"
+results_cell$Color[results_cell$FDR < 0.01 & results_cell$Estimate<0 ] <- "Enriched in NeuN FDR < 0.01"
+
+results_cell$Color[abs(results_cell$Estimate) < 0.5] <- "NS or FC < 0.5"
+
+
+results_cell$Color <- factor(results_cell$Color,
+                        levels = c("NS or FC < 0.5" , "Enriched in pSyn FDR < 0.05", "Enriched in NeuN FDR < 0.05","Enriched in pSyn P < 0.05", "Enriched in NeuN P < 0.05", "Enriched in pSyn FDR < 0.01", "Enriched in NeuN FDR < 0.01" ))
+
+# pick top genes for either side of volcano to label
+# order genes for convenience:
+results_cell$invert_P <- (-log10(results_cell$P)) * sign(results_cell$Estimate)
+
+```
+
+
+```{r}
+
+top_g <- c()
+
+
+
+top_gene1<-results_cell[, 'Gene'][order(results_cell[, 'invert_P'], decreasing = TRUE)[1:15]]
+top_gene2<-results_cell[, 'Gene'][order(results_cell[, 'invert_P'], decreasing = FALSE)[1:15]]
+   
+top_g<-c(top_gene1,top_gene2)
+
+top_g <- unique(top_g)
+
+highlight_top_g<-subset(results_cell, Gene %in% top_g & P<0.05 &  Color != "NS or FC < 0.5")
+
+
+# Graph  results_cell
+diff_exp3<-ggplot( results_cell,
+       aes(x = Estimate, y = -log10(`P`),
+           color = Color, label = Gene)) +
+    geom_vline(xintercept = c(0.5, -0.5), lty = "dashed", size=0.2) +
+    geom_hline(yintercept = -log10(0.05), lty = "dashed", size=0.2) +
+    geom_point(size=0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001, alpha=0.3) +
+    labs(x = "log2(FC)",
+         y = "Significance, -log10(P)",
+         color = "Key") +
+    scale_color_manual(values = c(`Enriched in pSyn FDR < 0.01`= "firebrick1",
+                                  `Enriched in pSyn FDR < 0.05` = "rosybrown2",
+                                  `Enriched in pSyn P < 0.05` = "rosybrown3",
+                                  `Enriched in NeuN FDR < 0.01` = "dodgerblue2",
+                                  `Enriched in NeuN FDR < 0.05` = "slategray2",
+                                  `Enriched in NeuN P < 0.05` = "slategray3",
+                                  `NS or FC < 0.5` = "gray"),
+                                  guide = guide_legend(override.aes = list(size = 0.5))) +
+    scale_y_continuous(expand = expansion(mult = c(0,0.05)),limits=c(0,16), breaks= c(4,8,12)) +
+    geom_text_repel(data = subset( results30, Gene %in% top_g & FDR<0.05 & Color != "NS or FC < 0.5"),
+                    size = 1.5, point.padding = 0.1, color = "black",
+                    min.segment.length = .3, box.padding = .1, lwd = .2,
+                    max.overlaps = 50, segment.size=0.05, force = 10, max.time = 3) +
+    theme_bw(base_size = 6) +
+  theme(axis.line = element_line(color='black'),
+    plot.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank())+
+    theme(legend.position = "bottom",
+          legend.key.size= unit(0.00001, 'cm'),
+          legend.title = element_text(size = 2),
+          legend.text = element_text(size=2),
+          legend.key.height = unit(0.3, 'cm'),
+          legend.key.width = unit(3, 'cm'))
+
+
+ggsave("volc_cell_markers_only_hu.pdf", width = 7, height = 7, units = "cm",path = de_plot_dir)
+
+```
+
+
+
+
+
+
+Supplemental figure 18B
+
+```{r}
+
+top_g <- c()
+
+
+
+top_gene1<-results30[, 'Gene'][order(results30[, 'invert_P'], decreasing = TRUE)[1:15]]
+top_gene2<-results30[, 'Gene'][order(results30[, 'invert_P'], decreasing = FALSE)[1:15]]
+   
+top_g<-c(top_gene1,top_gene2)
+
+top_g <- unique(top_g)
+
+
+
+top_g2 <- c()
+
+top_g2<-cell_types
+
+
+top_g2 <- unique(top_g)
+
+highlight_top_g<-subset( results30, Gene %in% top_g2 )
+
+
+# Graph  results30
+diff_exp3<-ggplot( results30,
+       aes(x = Estimate, y = -log10(`P`),
+           color = Color, label = Gene)) +
+    geom_vline(xintercept = c(0.5, -0.5), lty = "dashed", size=0.2) +
+    geom_hline(yintercept = -log10(0.05), lty = "dashed", size=0.2) +
+    geom_point(size=0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001, alpha=0.3) +
+    labs(x = "log2(FC)",
+         y = "Significance, -log10(P)",
+         color = "Key") +
+    scale_color_manual(values = c(`Enriched in pSyn FDR < 0.01`= "gray",
+                                  `Enriched in pSyn FDR < 0.05` = "gray",
+                                  `Enriched in pSyn P < 0.05` = "gray",
+                                  `Enriched in NeuN FDR < 0.01` = "gray",
+                                  `Enriched in NeuN FDR < 0.05` = "gray",
+                                  `Enriched in NeuN P < 0.05` = "gray",
+                                  #`P < 0.05` = "orange2",
+                                  `NS or FC < 0.5` = "gray"),
+                                  guide = guide_legend(override.aes = list(size = 0.5))) +
+    scale_y_continuous(expand = expansion(mult = c(0,0.05)),limits=c(0,16), breaks= c(4,8,12)) +
+    geom_text_repel(data = subset( results30, Gene %in% top_g & FDR<0.05 & Color != "NS or FC < 0.5"),
+                    size = 1.5, point.padding = 0.1, color = "black",
+                    min.segment.length = .3, box.padding = .1, lwd = .2,
+                    max.overlaps = 50, segment.size=0.05, force = 10, max.time = 3) +
+    theme_bw(base_size = 6) +
+  theme(axis.line = element_line(color='black'),
+    plot.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank())+
+    theme(legend.position = "bottom",
+          legend.key.size= unit(0.00001, 'cm'),
+          legend.title = element_text(size = 2),
+          legend.text = element_text(size=2),
+          legend.key.height = unit(0.3, 'cm'),
+          legend.key.width = unit(3, 'cm')) +
+  geom_point(data=highlight_top_g, alpha=0.9, size=0.55,stroke=0.1, color="green")
+    
+
+ggsave("volc_cell_marker_overlay_hu.pdf", width = 7, height = 7, units = "cm",path = de_plot_dir)
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,2081 @@
+---
+title: "Helper_Functions_Pipeline"
+author: "Thomas Goralski"
+date: '2022-07-26'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+
+You must ensure that DCC files are the correct version, the following function will make that conversion. Only run if you need to 
+```{r}
+#set file path to DCC files
+files <- list.files(path="DCC-20220830", pattern=NULL, all.files=FALSE,full.names=FALSE)
+#change working direcotry to folder with DCC files
+setwd("DCC-20220830")
+#loop to change version
+for (file in files) {
+tx <- readLines(file)
+tx2 <- gsub(pattern = "Pipeline_dev", replace = "Pipeline_2.0.0", x = tx)
+writeLines(tx2, con=file)
+}
+```
+
+
+
+
+
+
+The below are helper functions for the GeoMX data analysis pipline. The get_qc function is highly verbose. I suggest running Qc manually until you have a feeling for what QC is doing, then use get_qc as a effecient method of getting QC reports
+```{r}
+############################################################################################################################################################################
+ 
+ 
+ #' get_libraries
+ #'
+ #' @param library_list vector containing names (string) of packages needed 
+ #'
+ #' @return 
+ #' @export
+ #'
+ #' @examples
+ #' 
+ #'@summary Given a list of packages, loads packages.  
+ #'  
+ #'  
+ 
+ get_libraries<-function(library_list){
+  for(i in library_list){
+    package<- i
+    library(package, character.only = TRUE)
+  } 
+ }
+ 
+ 
+ ############################################################################################################################################################################
+ 
+#' Run_Qc
+  #'
+  #' @param Dataset geoMX data to perform qc on
+  #' @param Parameters Qc parameters 
+  #' @param segment_id IN QUOTES : colname from annotation file that designates segment strategy
+  #' @param neg_norm determine if negative normalization should be performed
+  #' @param 
+  #' 
+  #' @summary  return QC'd and normalized data. 
+  #' 
+  #'
+  #' 
+  #' 
+  #' 
+
+invisible(run_qc<-function(Dataset, Parameters, segment_id, neg_norm=FALSE ){
+
+  
+ #shift all number then 1 to one so when log normalized they will be 0.
+  probe_data_qc <- shiftCountsOne(Dataset, useDALogic = TRUE)
+ 
+  
+  #first make sure phenotype data is categorical
+  
+  
+  # Save this as a data frame
+qc_param_tab <- data.frame(Parameter=names(GeomxTools:::DEFAULTS), 'Default value'=as.numeric(GeomxTools:::DEFAULTS), 'Actual value'=as.numeric(Parameters))
+
+
+#nested function
+makeQCHistogram<-function(object, annotation_col=NULL, bins=NULL, fill_by=NULL, xintercept=NULL, scale_trans=NULL){
+ ## Plotting
+  # Extract data frame of QC data from the NanoStringGeoMxSet object.
+  plot_df <- sData(object)
+
+  # Create histogram
+  plt <- ggplot(plot_df,
+                aes_string(x = paste0("unlist(`", annotation_col, "`)"),
+                           fill = fill_by)) +
+    geom_histogram(bins = bins) +
+    geom_vline(xintercept = xintercept, lty = "dashed", color = "black") +
+    theme_bw() + guides(fill = "none") +
+    labs(x = annotation_col, y = "Segments, #", title = annotation_col)+
+    scale_fill_manual(values=c(NeuN="steelblue1", pSyn= "firebrick1"))
+  
+ 
+
+  # Facet the histogram if "fill_by" is specified
+  if(!is.null(fill_by)) {
+    plt <- plt +
+      facet_wrap(as.formula(paste("~", fill_by)), nrow = length(unique(plot_df[,fill_by])))
+  }
+
+  # Add continuous x-axis if "scale_trans" is specified
+  if(!is.null(scale_trans)) {
+    plt <- plt +
+      scale_x_continuous(trans = scale_trans)
+  }
+
+  # Plot Histogram
+  print(plt)
+}
+
+
+
+
+
+
+
+ 
+
+
+
+
+
+
+
+# Assess QC flags using setSegmentQCFlags
+probe_data_qc <- setSegmentQCFlags(probe_data_qc, qcCutoffs = Parameters)
+QCResults <- protocolData(probe_data_qc)[["QCFlags"]]
+flag_columns <- colnames(QCResults)
+QC_Summary <- data.frame(Pass = colSums(!QCResults[, flag_columns]),
+                         Flag = colSums(QCResults[, flag_columns]))
+
+QCResults$QCStatus <- apply(QCResults, 1L, function(x) {
+    ifelse(sum(x) == 0L, "PASS", "WARNING")
+})
+
+QC_Summary["TOTAL FLAGS", ] <-
+    c(sum(QCResults[, "QCStatus"] == "PASS"),
+      sum(QCResults[, "QCStatus"] == "WARNING"))
+pData(Dataset)$QC <- QCResults$QCStatus
+
+ dt_params$autoWidth <- FALSE
+ dt_params$buttons <-   list(list(extend = "copy"),
+                             list(extend = "csv", filename = "SegmentQCSummary.csv"),
+                             list(extend = "excel", filename = "SegmentQCSummary.xlsx"))
+qc_sums<-DT::datatable(
+   QC_Summary[, ],
+   extensions = c("Buttons", "Scroller", "FixedColumns"),
+   options = dt_params)
+
+print(qc_sums)
+
+# Create summary table of NTCs
+# ntc_summary_tab <- ddply(sData(probe_data_qc) %>% 
+#                           dplyr::select(Plate_ID, NTC_ID, NTC), .(Plate_ID, NTC_ID), function(x){
+#  ntc_well <- x$NTC_ID[1]
+#  ntc_count <- x$NTC[1]
+#  n_samples <- nrow(x)
+#  return(data.frame('NTC Well ID'=ntc_well, 'NTC counts' = ntc_count, 'Samples'=n_samples))
+# }) %>% dplyr::select(-NTC_ID)
+# colnames(ntc_summary_tab) <- c("Plate", "NTC Well", "NTC Counts", "Samples")
+
+# Return data table with summary of QC flags, if any are identified
+
+
+
+
+
+# Un-embed data frames from the QC data
+for (column in colnames(sData(probe_data_qc))) {
+    if (inherits(sData(probe_data_qc)[,column], "data.frame") && ncol(sData(probe_data_qc)[,column])==1){
+        probe_data_qc@protocolData@data[,column] <- sData(probe_data_qc)[, column][,1]
+    }
+}
+# calculate the negative geometric means for each module
+negativeGeoMeans <- 
+    esBy(negativeControlSubset(probe_data_qc), 
+         GROUP = "Module", 
+         FUN = function(x) { 
+             assayDataApply(x, MARGIN = 2, FUN = ngeoMean, elt = "exprs") 
+         }) 
+
+# Convert embedded matrix to df then to AnnotatedDataFrame
+protocolData(probe_data_qc) <-  as(
+  cbind(
+    as(protocolData(probe_data_qc), "data.frame"),
+    as.data.frame(negativeGeoMeans)
+  ), "AnnotatedDataFrame")
+# Here are the module names
+pkcs <- annotation(probe_data_qc)
+modules <- gsub(".pkc", "", pkcs)
+
+
+# Copy the Negative geoMeans from sData to pData
+negCols <- paste0("NegGeoMean_", modules)
+# negCols <- colnames(sData(probe_data_qc)[["NegGeoMean"]])
+pData(probe_data_qc)[, negCols] <- sData(probe_data_qc)[, which(colnames(sData(probe_data_qc)) %in% modules)]
+
+
+# detatch neg_geomean columns ahead of aggregateCounts call
+pData(probe_data_qc) <- pData(probe_data_qc)[, !colnames(pData(probe_data_qc)) %in% negCols]
+
+
+
+
+
+seg_qc_samples_to_remove <- rownames(QCResults)[QCResults$QCStatus!="PASS"]
+
+probe_data_qc_for_seg_qc_plots <- probe_data_qc # for plotting (appendix) before filtering
+pre_filter <- dim(probe_data_qc)
+
+if(length(seg_qc_samples_to_remove)>0){
+  probe_data_qc <- probe_data_qc[,-which(colnames(probe_data_qc) %in% seg_qc_samples_to_remove)]
+}
+passed_seg_qc <- dim(probe_data_qc)
+
+
+
+
+  #start QC lots
+  p <- makeQCHistogram(probe_data_qc_for_seg_qc_plots,  
+                     annotation_col = "Trimmed (%)", 
+                     fill_by = segment_id, 
+                     bins = 50,
+                     xintercept = Parameters$percentTrimmed)
+ggsave(p, filename = file.path(qc_dir, "trimmed.svg"), width=3, height=3)  #save plot
+
+
+ 
+#Rinse Wash repeat
+  p <- makeQCHistogram(probe_data_qc_for_seg_qc_plots, 
+                     annotation_col = "Aligned (%)", 
+                     fill_by = segment_id, 
+                     bins = 50,
+                     xintercept = Parameters$percentAligned)
+ggsave(p, filename = file.path(qc_dir, "aligned.svg"), width=3, height=3)
+
+
+
+#Rinse Wash repeat
+  p <- makeQCHistogram(probe_data_qc_for_seg_qc_plots, 
+                     annotation_col = "Saturated (%)", 
+                     fill_by = segment_id, 
+                     bins = 50,
+                     xintercept = Parameters$percentSaturation) +
+  labs(title = "Sequencing Saturation (%)",
+       x = "Sequencing Saturation (%)")
+ggsave(p, filename = file.path(qc_dir, "saturated.svg"), width=3, height=3)
+
+
+    
+  p <- makeQCHistogram(probe_data_qc_for_seg_qc_plots, 
+                     annotation_col = "area", 
+                     fill_by = segment_id, 
+                     bins = 50,
+                     xintercept = Parameters$minArea)
+ggsave(p, filename = file.path(qc_dir, "area.svg"), width=3, height=3)
+
+
+
+#Rinse wash repeat
+  p <- makeQCHistogram(probe_data_qc_for_seg_qc_plots, 
+                     annotation_col = "AOINucleiCount", 
+                     fill_by = segment_id, 
+                     bins = 50,
+                     xintercept = Parameters$minNuclei)
+ggsave(p, filename = file.path(qc_dir, "Nuclei.svg"), width=3, height=3)
+
+
+
+
+
+for(ann in modules) {
+    p <- makeQCHistogram(probe_data_qc_for_seg_qc_plots, 
+                         annotation_col = ann, 
+                         fill_by = segment_id, 
+                         bins = 50,
+                         xintercept = 2,
+                         scale_trans = "log10")
+    ggsave(p, filename = file.path(qc_dir, paste0(ann, ".svg")), width=6, height=6)
+   
+}
+
+
+
+
+# QC probes across remaining segments
+probe_data_qc <- setBioProbeQCFlags(probe_data_qc, 
+                                    qcCutoffs = Parameters, 
+                                    removeLocalOutliers = TRUE)
+ProbeQCResults <- fData(probe_data_qc)[["QCFlags"]]
+
+# Define QC table for Probe QC
+ProbeQC_summary <- data.frame(Passed = sum(rowSums(ProbeQCResults[, -1]) == 0),
+                              Global = sum(ProbeQCResults$GlobalGrubbsOutlier),
+                              Local = sum(rowSums(ProbeQCResults[, -2:-1]) > 0
+                                          & !ProbeQCResults$GlobalGrubbsOutlier))
+
+
+#get summary table
+probe_sums<-DT::datatable(
+   ProbeQC_summary[, ],
+   extensions = c("Buttons", "Scroller", "FixedColumns"),
+   options = dt_params)
+
+
+# remove flagged probes
+probe_data_qc <- 
+ subset(probe_data_qc, 
+        fData(probe_data_qc)[["QCFlags"]][,c("LowProbeRatio")] == FALSE &
+         fData(probe_data_qc)[["QCFlags"]][,c("GlobalGrubbsOutlier")] == FALSE)
+passed_bioprobe_qc <- dim(probe_data_qc)
+
+
+
+print(probe_sums)
+
+#Nested Function
+
+getGenesAboveLOQ<-function(object,
+                                elt="loq_mat",
+                                return_matrix=FALSE,
+                                loq_critical=Parameters$loqCutoff,
+                                loq_min=2,
+                                n=2,
+                                agg_function = formals(GeomxTools::aggregateCounts)$FUN) {
+
+  ## Check the input
+
+  # Note: with setMethod of signature NanoStringGeoMxSet,
+  # the object class is already checked. However, the second part
+  # of spec #1 should be checked.
+  if(featureType(object)!="Probe"){
+    stop("Input NanoStringGeoMxSet needs to have featureType of Probe.")
+  }
+
+  # The return_matrix argument must be logical.
+  if(!inherits(return_matrix, "logical")){
+    stop("return_matrix must be logical: TRUE, FALSE.")
+  }
+
+  # If return_matrix is FALSE, elt needs to be
+  # a character with at length > 1.
+  if(!return_matrix){
+    if(!inherits(elt, "character")){
+      stop("Please provide a character for elt.")
+    }
+    if(nchar(elt) == 0){
+      stop("elt can not be a zero-length variable name.")
+    }
+  }
+
+  # If return_matrix is FALSE, elt must point to an empty element in object
+  if(!return_matrix & !is.null(assayDataElement(object, elt=elt))){
+    stop(paste0("Assay data element ",
+                elt,
+                " is not NULL. Please provide a new element name.")
+    )
+  }
+
+  # The loq_critical is a single, positive numeric value
+  if(!inherits(loq_critical, "numeric")){
+    stop("loq_critical needs to be numeric.")
+  } else if(length(loq_critical)!=1){
+    stop("loq_critical needs to be a single numeric value.")
+  } else if(loq_critical < 0){
+    stop("loq_critical needs to be positive.")
+  }
+
+  # The loq_min is a single, positive numeric value
+  if(!inherits(loq_min, "numeric")){
+    stop("loq_min needs to be numeric.")
+  } else if(length(loq_min)!=1){
+    stop("loq_min needs to be a single numeric value.")
+  } else if(loq_min < 0){
+    stop("loq_min needs to be positive.")
+  }
+
+  # The n is a single, positive numeric value
+  if(!inherits(n, "numeric")){
+    stop("n needs to be numeric.")
+  } else if(length(n)!=1){
+    stop("n needs to be a single numeric value.")
+  } else if(n < 0){
+    stop("n needs to be positive.")
+  }
+
+  ## Processing
+  # What modules are used?
+  modules <- unique(fData(object)[["Module"]])
+
+  # negative subset of object
+  neg_subset <- NanoStringNCTools::subset(object, CodeClass == "Negative")
+
+  # Here are the negative geoMeans per module
+  negativeGeoMeans <-
+    NanoStringNCTools::esBy(neg_subset,
+         GROUP = "Module",
+         FUN = function(x) {
+             assayDataApply(x, MARGIN = 2, FUN = ngeoMean, elt = "exprs")
+         })
+  # prepend NegGeoMean_ to column names
+  colnames(negativeGeoMeans) <- paste0("NegGeoMean_", colnames(negativeGeoMeans))
+
+  # Here are the negative geoSDs per module
+  negativeGeoSDs <-
+    NanoStringNCTools::esBy(neg_subset,
+         GROUP = "Module",
+         FUN = function(x) {
+             assayDataApply(x, MARGIN = 2, FUN = ngeoSD, elt = "exprs")
+         })
+  # prepend NegGeoSD_ to column names
+  colnames(negativeGeoSDs) <- paste0("NegGeoSD_", colnames(negativeGeoSDs))
+
+  # add geoMeans and geoSDs to pData
+  means_and_SDs <- cbind(negativeGeoMeans, negativeGeoSDs)
+  pData(object) <- cbind(pData(object), means_and_SDs[row.names(pData(object)),]) # ensure row.name order
+
+  # Sample-specific (row) LOQ for each pool (column)
+  LOQ_df <- do.call(cbind, lapply(modules, function(module){
+    module_cols <- paste0(c("NegGeoMean_", "NegGeoSD_"), module)
+    loq_module <- data.frame(apply(pData(object)[,module_cols], 1, function(i){
+     pmax(loq_min, (i[1]*(i[2]^n)))
+    }))
+    colnames(loq_module) <- paste0("LOQ_",module)
+    return(loq_module)
+    }))
+
+  # add LOQ column(s) to pData(object). This is conditional on the
+  # number of columns (i.e., modules)
+  if(ncol(LOQ_df)==1){
+   pData(object)[[colnames(LOQ_df)]] <- LOQ_df[row.names(pData(object)),]
+  } else {
+   pData(object) <- cbind(pData(object), LOQ_df[row.names(pData(object)),])
+  }
+
+  # strip leading LOQ_ from column names so they are identical to the module names
+  # (used downstream)
+  colnames(LOQ_df) <- gsub("LOQ_", "", colnames(LOQ_df))
+
+  # geoMean, geoSD, and LOQ are at the sample level. Aggregate probe counts
+  # to target level for feature data.
+  object <- aggregateCounts(object, FUN=as.character(agg_function))
+
+  # Create logical LOQ matrix.
+  loq_mat <- do.call(rbind, lapply(modules, function(module){
+   module_logic <- fData(object)[["Module"]] == module
+   mat_module <- t(esApply(object[module_logic, ], MARGIN = 1,
+                       FUN = function(x) {
+                           x > LOQ_df[, module]
+                       }))
+   return(mat_module)
+  }))
+
+  # Restore the row order and column order
+  loq_mat <- loq_mat[rownames(object),]
+  loq_mat <- loq_mat[,colnames(object)]
+
+  # Detection rate (adds 2 columns to fData(object) and one to pData(object))
+  pData(object)$GenesDetected <- colSums(loq_mat, na.rm = TRUE) # number of features expressed above sample-specific LOQ
+  fData(object)$DetectedSegments <- rowSums(loq_mat, na.rm = TRUE) # number of samples above LOQ for each feature
+  fData(object)$DetectionRate <- fData(object)$DetectedSegments / nrow(pData(object))
+
+  # Return the matrix or the modified object
+  if(return_matrix){
+    return(loq_mat)
+  } else {
+    assayDataElement(object, elt=elt) <- loq_mat
+    return(object)
+  }
+}
+
+
+
+
+#start limit of qunatification analysis
+loq_data <- getGenesAboveLOQ(probe_data_qc, 
+                             loq_critical=Parameters$loqCutoff, 
+                             loq_min = 2, 
+                             n = 2)
+
+# Define QC table for Probe QC
+Probeloq_summary <- data.frame(beforeLOQ= length(rownames(probe_data_qc)),
+                              afterLOQ = length(rownames(loq_data)),
+                              totalbelowLOQ = length(rownames(probe_data_qc))-length(rownames(loq_data)))
+
+
+#get summary table
+probe_loq<-DT::datatable(
+   Probeloq_summary[, ],
+   extensions = c("Buttons", "Scroller", "FixedColumns"),
+   options = dt_params)
+
+
+print(probe_loq)
+
+pData(loq_data)$FeatureDetectionRate <- pData(loq_data)$GenesDetected/nrow(loq_data)
+pData(loq_data)$FeatureDetectionBin <- cut(pData(loq_data)$FeatureDetectionRate,
+        breaks = c(-1e-16, 0.01, 0.05, 0.1, 0.15, 1), #-1e-16 to include zeros
+        labels = c("<1%", "1-5%", "5-10%", "10-15%", ">15%"))
+
+
+
+
+#nested function
+getColorPalette <- function(input,              # Input must be data.frame
+                            start = 1 ,         # Which color to start with
+                            custom = NULL,      # A custom color palette, vector of type character
+                            method = "Map"){    # Color palette type (this could change in the future)
+
+## Check input
+   # input should be a data.frame
+   if(!inherits(input, "data.frame")){
+      stop("input must be a data.frame")
+   }
+
+   # start must be a positive numeric integer.
+   if(!is.null(start)) {
+      if (!inherits(start, "numeric")) {
+        stop("start must be numeric.")
+      }
+      if (start %% 1 != 0) {
+        stop(paste0("The start given, ", start, " is not an integer."))
+      }
+      if (start < 1) {
+        stop("start must be >= 1.")
+      }
+   }
+
+   # custom must be a vector of mode character
+   if(!is.null(custom)) {
+      if(!inherits(custom, "character")){
+        stop("custom color palette must be a vector of mode character")
+      }
+      if(length(custom) < 1){
+        stop("custom must be at least length 1")
+      }
+      if(is.vector(custom) & is.list(custom)){
+        stop("custom must be a vector of mode character, not a list")
+      }
+   }
+
+   # method mustbe a character either: "Map", "Main", or "Other"; "Map" is default
+   if(!method %in% c("Map","Main","Other")){
+    stop("method must be one of: 'Main', 'Map', or 'Other'")
+   }
+
+
+# Make a palette data frame for reference at start of report
+           l <- start
+           input <- as.data.frame(input)
+           color_pal <- list()
+           input[] <- lapply(input, factor)
+           for (i in 1:ncol(input)) {
+            input[, i] <-
+             factor(input[, i], levels = levels(factor(input[, i])), order = TRUE)
+            pal <- report_pals(method = method,
+                               n = length(levels(factor(input[, i]))),
+                               start = l,
+                               custom = custom)
+            names(pal) <- levels(input[, i])
+            l <- l + length(levels(input[, i]))
+            color_pal[[length(color_pal) + 1]] <- pal
+           }
+           names(color_pal) <- names(input)
+
+  return(color_pal)
+}
+
+
+
+
+
+
+
+#Helper function:
+# Grab colors depending on which method: Main, Map, other
+report_pals <- function(method = NULL,          # which palette type (Main, Map, or Other)
+                        n = NULL,                   # how many colors to include in the palette
+                        start = NULL,                # what color to start on
+                        custom = NULL) {          # list of custom colors to be used as a palette
+ if(!is.null(custom)) {
+  pal <- custom
+ } else {
+  if(method == "Main") {
+   # define palette for use in boxplots / scatter plots with annotations, n = 10 colors
+   pal <- c("#3A6CA1", "#FFD861", "#CF4244", "#47BAB4", "#474747", "#EB739E", "#318026", "#A66293", "#F28E2B", "#8F6954")
+   #defaults: blues  ,  yellows ,   reds   ,   teals  ,   grays  ,   pinks  ,   greens ,  purples ,  oranges ,  browns
+  } else if(method == "Map") {
+   # define palette to be passed to annotation maps (heatmap), n = 20 colors
+   pal <- c("#3A6CA1", "#FFD861", "#D86769", "#AEE8E2", "#999999", "#FABFD2", "#318026", "#A66293", "#F28E2B", "#E3C0AC",
+            "#A0CBE8", "#9E7E20", "#FFBFBD", "#2CABA3", "#474747", "#EB739E", "#A0E391", "#E8C1DE", "#FCB36A", "#B0846B")
+  } else if(method == "Other") {
+   # define palette to be passed to other types of factors that could be useful in the future: cell types, genes, etc, n = 20 colors
+   pal <- c("#3A6CA1", "#FFD861", "#D86769", "#AEE8E2", "#999999", "#FABFD2", "#318026", "#A66293", "#F28E2B", "#E3C0AC",
+            "#A0CBE8", "#9E7E20", "#FFBFBD", "#2CABA3", "#474747", "#EB739E", "#A0E391", "#E8C1DE", "#FCB36A", "#B0846B")
+  }
+ }
+
+ ntot <- n + start - 1
+ if(ntot > length(pal)) {
+  pal <- rep(pal, ceiling(ntot / length(pal)))
+ }
+ return(pal[seq(start, ntot)])
+}
+
+
+
+
+# set report color palette
+pal_main <- getColorPalette(pData(probe_data)[, factors_of_interest[c(2:length(factors_of_interest),1)]], method = "Main")
+
+
+#pick segmentation strategy to color by from pData
+Ind<-which(factors_of_interest==segment_id)
+  
+
+
+
+
+
+
+
+
+
+
+
+p <- ggplot(pData(loq_data),
+       aes(x = FeatureDetectionBin)) +
+    geom_bar(aes_string(fill = gene_detection_rate_color_by)) +
+    geom_text(stat = "count", aes(label = ..count..), vjust = -0.5) +
+    theme_bw() +
+    scale_fill_manual(values = c("steelblue1", "firebrick1")) + 
+    scale_x_discrete(drop=FALSE) +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+    labs(x = "Gene Detection Rate",
+         y = "Segments, #",
+         fill = "class")
+ggsave(p, filename = file.path(qc_dir, "segments_with_x_above_LOQ.svg"), width=6, height=5)
+
+print(p)
+
+
+
+# capture segments with low target detection rates
+low_content_segments <- 
+ !pData(loq_data)$FeatureDetectionRate >= loq_segment_filter_proportion
+low_content_Ids <- rownames(pData(loq_data))[low_content_segments]
+high_content_Ids <- rownames(pData(loq_data))[!low_content_segments]
+# save these to probe_data as QC flags for graphing in the sankey diagram
+pData(probe_data)[low_content_Ids, "QC"] <- "WARNING"
+saveRDS(object=probe_data, file=file.path(object_dir, "probe_data.RDS"))
+
+#save these to probe data qc for data table output
+
+
+#make data table
+segQCresults <- pData(probe_data_qc)[["QC"]]
+
+# Define QC table for Probe QC
+segQC_summary <- data.frame(Passed = length(high_content_Ids) ,
+                              Fail = length(low_content_Ids))
+                              
+
+
+#get summary table
+seg_sums<-DT::datatable(
+   segQC_summary[, ],
+   extensions = c("Buttons", "Scroller", "FixedColumns"),
+   options = dt_params)
+
+
+#print the summary of segments filtered
+print(seg_sums)
+
+# remove low content segments from the data
+loq_data <- loq_data[, !low_content_segments]
+passed_loq_filter_segment <- dim(loq_data)
+
+
+# Recalculate proportions in filtered dataset
+fData(loq_data)$DetectedSegments <-
+ rowSums(assayDataElement(loq_data, elt = "loq_mat"), na.rm = TRUE)
+fData(loq_data)$DetectionRate <-
+    fData(loq_data)$DetectedSegments / nrow(pData(loq_data))
+
+# Preparing summary data.frame
+the_proportions <- c(0.01, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5)
+plot_detect <- data.frame(Freq=100*the_proportions) # proportions to percent transformation
+plot_detect$Number <-  unlist(lapply(the_proportions, function(x){
+    sum(fData(loq_data)$DetectionRate >= x)
+    }))
+plot_detect$Rate <- plot_detect$Number / nrow(fData(loq_data))
+rownames(plot_detect) <- plot_detect$Freq
+
+# Creating ggplot object
+p <- ggplot(plot_detect, aes(x = as.factor(Freq), y = Rate, fill = Rate)) +
+  geom_bar(stat = 'identity') +
+  geom_text(aes(label = formatC(Number, format = 'd', big.mark = ',')),
+            vjust=1.6, color = 'black', size = 4) +
+  scale_fill_gradient2(low = 'orange2', mid = 'lightblue',
+                       high = 'dodgerblue3', midpoint = 0.65,
+                       limits = c(0,1),
+                       labels = scales::percent) +
+  theme_bw() +
+  scale_y_continuous(labels = scales::percent, limits = c(0,1),
+                     expand = expansion(mult = c(0, 0))) +
+  labs(x = '% of Segments',
+       y = 'Genes Detected, % of Panel > LOQ')
+
+# save and figure results
+ggsave(p, filename = file.path(qc_dir, "features_with_x_above_LOQ.svg"), width=6, height=5)
+
+
+print(p)
+
+
+# set threshold for segment QC and filter to segments with reasonable target detection
+target_data <- loq_data[fData(loq_data)$DetectionRate > loq_feature_filter_proportion |
+                         fData(loq_data)$Negative==TRUE |
+                         fData(loq_data)$TargetName %in% allow_list, ]
+
+# Set targets without the negative probe for reporting purposes
+target_data_no_negative <- loq_data[fData(loq_data)$DetectionRate > loq_feature_filter_proportion |
+                         fData(loq_data)$TargetName %in% allow_list, ]
+passed_loq_filter_features <- dim(target_data_no_negative)
+
+
+
+
+
+
+
+
+#identify pheno data set
+pheno_data_post_filter <- pData(loq_data)
+pheno_data_post_filter[is.na(pheno_data_post_filter)] <- "NA"
+
+
+PD_vec<-c("01-52","07-39","14-12","16-15","16-39","18-12","18-14","18-65","19-31")
+
+cases<-pheno_data_post_filter$Case
+
+PD_ind_qc<- cases %in% PD_vec
+
+#PD_ind_qc<-which(PD_ind==TRUE)
+pheno_data_post_filter<-pheno_data_post_filter[PD_ind_qc,]
+
+sample_overview <- pheno_data_post_filter %>% dplyr::select(eval(factors_of_interest)) %>% plyr::count()
+sample_overview_set <- gather_set_data(sample_overview, 1:length(factors_of_interest))
+
+
+
+
+
+
+
+
+#specify sammple overview set
+# pheno_data <- pData(probe_data)
+# pheno_data[is.na(pheno_data)] <- "NA"
+# pData(probe_data) <- pheno_data
+# 
+# sample_overview <- pheno_data %>% dplyr::select(eval(factors_of_interest)) %>% plyr::count()
+# sub<-which(sample_overview$AllenscData=="AI")
+# sample_overview<-sample_overview[-sub,]
+# sub<-which(sample_overview$AllenscData=="CPu")
+# sample_overview<-sample_overview[-sub,]
+# sample_overview_set <- gather_set_data(sample_overview, 1:length(factors_of_interest))
+
+
+
+colors<- c("dodgerblue1", "firebrick1")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Plot SanKey
+p <- ggplot(data=sample_overview_set[,], 
+            aes(x, id=id, split=y, value=freq)) + 
+    geom_parallel_sets(aes_string(fill=sankey_focal_factor), alpha=0.5) + 
+    geom_parallel_sets_axes(axis.width = 0.2) +
+    geom_parallel_sets_labels(color = "white", size = 2.5) +
+    theme_classic(base_size = 12) + 
+    theme(legend.position = "bottom",
+          axis.ticks.y = element_blank(),
+          axis.line = element_blank(),
+          axis.text.y = element_blank()) +
+    scale_y_continuous(expand = expansion(0)) + 
+    scale_x_discrete(expand = expansion(c(0, 0.2))) +
+    scale_fill_manual(values = colors) +
+    labs(x = "", y = "") +
+    annotate(geom = "segment", x = length(factors_of_interest) + 0.25,
+             xend = length(factors_of_interest) + 0.25,
+             y = round_any(nrow(pheno_data_post_filter)/10, 10),
+             yend = round_any(nrow(pheno_data_post_filter)/10, 10) + 
+              round_any(nrow(pheno_data_post_filter)/4, 25), lwd = 2) +
+    annotate(geom = "text", x = length(factors_of_interest) + 0.35,
+             y = round_any(nrow(pheno_data_post_filter)/10, 10) +
+              round_any(nrow(pheno_data_post_filter)/4, 25)/2, 
+             angle = 270, size = 5, hjust = 0.5,
+             label = paste0(round_any(nrow(pheno_data_post_filter)/4, 25), " segments"))
+ggsave(p, filename = file.path(qc_dir, "SanKey_afterQC.svg"), width=3, height=3)
+print(p)
+
+
+if("QC" %in% factors_of_interest) {
+ factors_of_interest <- setdiff(factors_of_interest, "QC")
+}
+
+
+
+
+
+if(neg_norm==TRUE){
+  target_data <- normalize(target_data, norm_method = "neg", 
+                         fromElt = "exprs", toElt = "neg_norm")
+  assayDataElement(object = target_data, elt = "log_neg") <-
+    assayDataApply(target_data, 2, FUN = log, base = 2, elt = "neg_norm")
+}
+
+
+
+#nomralize nuclei count
+
+
+# use norm_method = "quant" and desiredQuantile = 0.75 to normalize to Q3
+
+
+
+
+
+
+
+
+assayDataElement(object = target_data, elt = "nuclei")<-t(assayDataApply(target_data, 1, FUN =function(x) x/target_data@phenoData@data$AOINucleiCount, elt="exprs"))
+
+target_data <- normalize(target_data, 
+                         norm_method = "quant", 
+                         fromElt = "exprs",
+                         toElt = "q_norm",
+                         desiredQuantile = 0.75)
+
+
+target_data <- normalize(target_data, 
+                         norm_method = "quant", 
+                         fromElt = "nuclei",
+                         toElt = "nuc_q_norm",
+                         desiredQuantile = 0.75)
+
+
+
+
+#ind<-which(target_data@assayData$q_norm< 1)
+#assayDataElement(object=target_data, elt = "q_norm")[ind]<-1
+
+
+#ind<-which(target_data@assayData$nuc_q_norm< 1)
+#assayDataElement(object=target_data, elt = "nuc_q_norm")[ind]<-1
+
+
+
+assayDataElement(object = target_data, elt = "log_q") <-
+    assayDataApply(target_data, 2, FUN = log, base = 2, elt = "q_norm")
+
+assayDataElement(object = target_data, elt = "nuc_log_q") <-
+    assayDataApply(target_data, 2, FUN = log, base = 2, elt = "nuc_q_norm")
+
+
+
+
+
+
+
+#the above sets the original zeros to the minimum value observed in post normalization of the data. While this is biasing data somewhat, this is necessary and desirable to other methods typically utilized, such as adding 1 to all values, adding one to all 0 values, etc. This bias essential sets our zero values to the limit of detection in our dataset, which is about the minimum bias we can hopeful when dealing with zeros.
+
+
+#if you want to use background subtraction, it's in the dataset
+target_data <- normalize(target_data, norm_method = "subtractBackground", 
+                        fromElt = "exprs", toElt = "background_subtraction")
+
+assayDataElement(target_data, "background_subtraction") <- 
+            assayDataElement(target_data, elt= "background_subtraction") + 1
+
+assayDataElement(object = target_data, elt = "log_background_subtraction") <-
+   assayDataApply(target_data, 2, FUN = log, base = 2, elt = "background_subtraction")
+
+
+
+
+target_data <- normalize(target_data, norm_method = "quant",
+                         fromElt = "background_subtraction", desiredQuantile = 0.75, toElt = "q_backSub_norm")
+
+
+assayDataElement(object = target_data, elt = "log_backSub_q") <-
+    assayDataApply(target_data, 2, FUN = log, base = 2, elt = "q_backSub_norm")
+
+ saveRDS(object=target_data, file=file.path(object_dir, "target_data.RDS"))
+
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ negativeProbefData <- subset(fData(target_data), CodeClass == "Negative")
+neg_probes <- unique(negativeProbefData$TargetName)
+
+# Graph Q3 value vs negGeoMean of Negatives
+ann_of_interest <- "segment"
+Stat_data <- 
+    data.frame(row.names = colnames(exprs(target_data)),
+               Segment = colnames(exprs(target_data)),
+               Annotation = pData(target_data)[, ann_of_interest],
+               Q3 = unlist(apply(exprs(target_data), 2,
+                                 quantile, 0.75, na.rm = TRUE)),
+               NegProbe = exprs(target_data)[neg_probes, ])
+Stat_data_m <- melt(Stat_data, measure.vars = c("Q3", "NegProbe"),
+                    variable.name = "Statistic", value.name = "Value")
+
+plt1 <- ggplot(Stat_data_m,
+               aes(x = Value, fill = Statistic)) +
+    geom_histogram(bins = 40) + theme_bw() +
+    scale_x_continuous(trans = "log2") +
+    facet_wrap(~Annotation, nrow = 1) + 
+    scale_fill_brewer(palette = 3, type = "qual") +
+    labs(x = "Counts", y = "Segments, #")
+
+plt2 <- ggplot(Stat_data,
+               aes(x = NegProbe, y = Q3, color = Annotation)) +
+    geom_abline(intercept = 0, slope = 1, lty = "dashed", color = "darkgray") +
+    geom_point() + guides(color = "none") + theme_bw() +
+    scale_x_continuous(trans = "log2") + 
+    scale_y_continuous(trans = "log2") +
+    theme(aspect.ratio = 1) +
+    labs(x = "Negative Probe GeoMean, Counts", y = "Q3 Value, Counts")+
+  scale_color_manual(values=c(NeuN="steelblue1", pSyn= "firebrick1"))
+
+plt3 <- ggplot(Stat_data,
+               aes(x = NegProbe, y = Q3 / NegProbe, color = Annotation)) +
+    geom_hline(yintercept = 1, lty = "dashed", color = "darkgray") +
+    geom_point() + theme_bw() +
+    scale_x_continuous(trans = "log2") + 
+    scale_y_continuous(trans = "log2") +
+    theme(aspect.ratio = 1) +
+    labs(x = "Negative Probe GeoMean, Counts", y = "Q3/NegProbe Value, Counts")+
+  scale_color_manual(values=c(NeuN="steelblue1", pSyn= "firebrick1"))
+
+btm_row <- plot_grid(plt2, plt3, nrow = 1, labels = c("B", ""),
+                     rel_widths = c(0.43,0.57))
+p<-plot_grid(plt1, btm_row, ncol = 1, labels = c("A", ""))
+ 
+ggsave(p, filename = file.path(qc_dir, paste0("q3_counts.svg")), "svg",
+                                width=10, height=6)
+
+print(p)
+
+negativeProbefData <- subset(fData(target_data), CodeClass == "Negative")
+neg_probes <- unique(negativeProbefData$TargetName)
+
+# Graph Q3 value vs negGeoMean of Negatives
+ann_of_interest <- "segment"
+Stat_data <- 
+    data.frame(row.names = colnames(exprs(target_data)),
+               Segment = colnames(exprs(target_data)),
+               Annotation = pData(target_data)[, ann_of_interest],
+               Q3 = unlist(apply(target_data@assayData$nuclei, 2,
+                                 quantile, 0.75, na.rm = TRUE)),
+               NegProbe = target_data@assayData$nuclei[neg_probes, ])
+Stat_data_m <- melt(Stat_data, measure.vars = c("Q3", "NegProbe"),
+                    variable.name = "Statistic", value.name = "Value")
+
+plt1 <- ggplot(Stat_data_m,
+               aes(x = Value, fill = Statistic)) +
+    geom_histogram(bins = 40) + theme_bw() +
+    scale_x_continuous(trans = "log2") +
+    facet_wrap(~Annotation, nrow = 1) + 
+    scale_fill_brewer(palette = 3, type = "qual") +
+    labs(x = "Counts", y = "Segments, #")
+
+plt2 <- ggplot(Stat_data,
+               aes(x = NegProbe, y = Q3, color = Annotation)) +
+    geom_abline(intercept = 0, slope = 1, lty = "dashed", color = "darkgray") +
+    geom_point() + guides(color = "none") + theme_bw() +
+    scale_x_continuous(trans = "log2") + 
+    scale_y_continuous(trans = "log2") +
+    theme(aspect.ratio = 1) +
+    labs(x = "Negative Probe GeoMean, Counts", y = "Q3 Value, Counts")
+
+plt3 <- ggplot(Stat_data,
+               aes(x = NegProbe, y = Q3 / NegProbe, color = Annotation)) +
+    geom_hline(yintercept = 1, lty = "dashed", color = "darkgray") +
+    geom_point() + theme_bw() +
+    scale_x_continuous(trans = "log2") + 
+    scale_y_continuous(trans = "log2") +
+    theme(aspect.ratio = 1) +
+    labs(x = "Negative Probe GeoMean, Counts", y = "Q3/NegProbe Value, Counts")
+
+btm_row <- plot_grid(plt2, plt3, nrow = 1, labels = c("B", ""),
+                     rel_widths = c(0.43,0.57))
+p<-plot_grid(plt1, btm_row, ncol = 1, labels = c("A", ""))
+
+ggsave(p, filename = file.path(qc_dir, paste0("nuc_q3_counts.svg")), "svg",
+                                width=10, height=6)
+
+
+print(p)
+
+
+ 
+ 
+#nested function
+ plotPairs <- function(dat, color_by, color_scale=NULL){
+
+ n <- ncol(dat)
+ p <- dat %>% ggpairs(.,
+    mapping = aes_string(colour=color_by, alpha=0.5),
+    columns=1:n, progress=FALSE,
+    lower = list(continuous = wrap("smooth", alpha=0.3, size=0.3),
+                 combo=wrap("facethist", bins=30)), cardinality_threshold = NULL
+  ) + theme_bw()
+
+ if(!is.null(color_scale)){
+  p <- p +
+   scale_color_manual(values=color_scale) +
+   scale_fill_manual(values=color_scale)
+ }
+ return(p)
+}
+ 
+ 
+ # Combine annotations, Q3 intensity, and background into a data.frame
+df <- pData(target_data) %>% dplyr::select(all_of(factors_of_interest))
+
+q3_intensity <- data.frame(Q3=unlist(apply(exprs(target_data), 2,
+                               quantile, 0.75, na.rm = TRUE)))
+
+negative_probes <- filter(fData(target_data), Negative==TRUE)$TargetName
+
+if(length(negative_probes)<1L){
+  stop("At least 1 negative probe is expected.")
+} else if(length(negative_probes)<=1L){
+  # i.e., 1 panel used; numeric
+  neg_moment <- data.frame(exprs(target_data)[negative_probes,])
+  colnames(neg_moment) <- gsub("-", ".", negative_probes)
+} else {
+  # i.e., >1 panels used; matrix
+  neg_moment <- data.frame(t(exprs(target_data)[negative_probes,]))
+}
+
+# Combine
+if(!all(row.names(df)==row.names(q3_intensity)) | !all(row.names(df)==row.names(neg_moment))){
+  stop("Check row names")
+} else {
+  signal_intensity <- cbind(df, q3_intensity, neg_moment)
+  signal_intensity <- signal_intensity %>% as_tibble() %>% tibble::add_column("Sample_ID"=row.names(signal_intensity), .before=1) %>% as.data.frame()
+}
+negative_probes_dots <- gsub("-", ".", negative_probes)
+signal_intensity_long <- 
+ tidyr::pivot_longer(signal_intensity, 
+                     cols=c(Q3, all_of(negative_probes_dots)), 
+                     names_to="Metric", values_to="value")
+
+
+
+# Save pairs plot graphs to disc for later download
+facs_to_graph <- factors_of_interest_non_numeric
+
+# pairs_plots <- list()
+# for(fac in facs_to_graph) {
+#  p <- plotPairs(dat=signal_intensity %>%
+#                   dplyr::select(Q3, c(all_of(negative_probes_dots), 
+#                                       all_of(fac))), 
+#                 color_by=fac, color_scale = pal_main[[fac]])
+#  ggsave(p, filename = file.path(qc_dir, paste0("pairs_", fac, ".svg")), "svg",
+#                                 width=10, height=6)
+#  pairs_plots[[fac]] <- p
+#  print(p)
+#  
+#  
+#  
+# 
+# }
+
+
+log_q<-target_data@assayData$log_q
+colnames(log_q)<-target_data@phenoData@data$segment
+  melt_nucq3<- melt(log_q)
+ 
+
+ 
+
+ 
+ p<-ggplot(melt_nucq3, aes(x=Var2, y=value, color=Var2 ))+
+  ggtitle("Plot of nuclei, q3, log normalized Data")+
+  geom_violin(alpha=0.5, bw=0.5)+
+    geom_boxplot(width=0.1)
+ ggsave(p, filename = file.path(qc_dir, paste0("violin_normalization.svg")), "svg",
+                                width=10, height=6)
+  print(p)
+
+ 
+})
+```
+
+
+
+
+
+
+
+
+
+
+Data Analysis
+Broken into three steps
+
+Differential Gene Expression/GSEA
+
+Dimension Reduction
+
+NCBI annotation of differentially expressed genes
+
+
+Each of these recieve further description below
+
+
+
+
+Dimension Reduction
+To understand variation of high dimension data, we will utilize Principle Components Analysis (PCA). PCA allows us to view the variation in 2 dimensions from different components of the dataset that explain/model the variation present in the dataset to different degrees. Each of these components explains a percentage of the variation within the dataset, and the number of components can expand indefinitely (to the number of dimensions?) (Leading to 100% variance explained). However, as the number of components increases the percentage of variance explained decreases for each subsequent component. This means that more components do not really give substantially more information and therefore contribute little to our understanding of the variation within the dataset. As such one must determine a cut point in the diminishing returns of each successive new component, which is typically determined through scree plots of the percentage of variance explained and using the elbow point or where the line of the plot begins approaching its asymptote. For automation purposes, we do not base the number of components on the scree plot as this requires human input, instead we intentionally oversample components and print the scree plot so the user can determine post analysis which components matter to their analysis. If the number of components does not reach the elbow of your plot, you can increase the number of components using the number of components parameter, then re-running the function. 
+
+Additionally, one can state the identity of a component through in understand of which dimensions withing the data correlate to the component. Dimensions that contribute to the characterization of the component will correlate with the component (either positively or negatively)  while dimensions that do not correlate are not a part of the components identity. For a component to be useful for our understanding of the variation of a dataset, it must explain a reasonable proportion of the variance, and have an identity of interest to the user. 
+
+If you do not have a solid grasp of the underlying statistics of the dimension reduction algorithm you are using, I do not recommend utilizing the approach. It is too easy to make incorrect conclusions about your dataset unless you fully understand what the function you are applying can and cannot do. 
+
+
+
+```{r}
+
+#function for getting PCA information
+
+get_PCA<- function(data,                     #your post QC dataset
+                    elt_to_use,
+                    number_components=10)
+                   #ggplot = FALSE) 
+                   {             
+  
+  
+PCA_data<-t(assayDataElement(object = data, elt = elt_to_use))
+
+ 
+
+
+for(i in 1:length(colnames(pData(data)))){
+  colnames<-colnames(pData(data)[(i)])
+  colnames_to_add<-c(colnames, colnames_to_add)
+  cols_to_add<-pData(data)[,i]
+PCA_data<-cbind.data.frame( cols_to_add, PCA_data )
+}  
+
+colnames(PCA_data)[1:length(colnames_to_add)]<-colnames_to_add
+
+
+
+
+types_of<-c()
+for(i in 1:length(colnames(pData(data)))){
+  pdat<-pData(data)[i]
+  types<-class(pdat[1,])
+  types_of<-c(types, types_of)
+  }
+
+quantitative_factors<-which(types_of=="numeric")
+#get all indices in types of not present in qualititative factors
+qualitative_factors<-setdiff(1:length(types_of),quantitative_factors)
+
+target_PCA<-FactoMineR::PCA(X= PCA_data, 
+                ncp=10,                #number of principle components to keep in dataset
+                scale.unit = TRUE,   #scales based on z-score... important for PCA, leave true
+                ind.sup= NULL,
+                quanti.sup= quantitative_factors,    #vector of the indexes of pheno data that is quantitative
+                quali.sup = qualitative_factors ,     #vector of indexes of the pheno data that is qualitative
+                row.w= NULL,         # weights for rows
+                col.w= NULL,         # weights for columns
+                graph=FALSE,         #wether graph should be auto displayed
+                axes= c(1,2)         # which components to display
+                  )
+
+
+#specify directory path
+pca_dir<-file.path(outdir, "PCA")
+#make the new folder in directory
+dir.create(pca_dir, recursive = TRUE)
+
+eigenvalues<-as.data.frame(target_PCA$eig)
+
+
+eigs<-ggplot(data = eigenvalues)+
+  aes(x=rownames(eigenvalues), y=eigenvalues$`percentage of variance`, group=1 )+
+  geom_point(shape=21, fill="blue")+
+  geom_line(fill="#add8e6")+
+  scale_x_discrete(limits=rownames(eigenvalues))+
+  theme( axis.text.x= element_text(size=8, angle=90))
+
+
+
+
+
+ggsave(eigs, file=file.path(pca_dir,"eigs.svg"), width = 12, height = 8)
+
+
+
+#if (ggplot == TRUE){
+
+quanti_corr1<-ggcorrplot(t(target_PCA$quanti.sup$cor), method= "circle")   
+
+ggsave(quanti_corr1, file=file.path(pca_dir, "quanti_corr1.svg"), width = 12, height = 8)
+
+
+
+
+quali_corr<-ggcorrplot((target_PCA$quali.sup$coord), method= "circle")
+
+ggsave(quali_corr, file=file.path(pca_dir, "quali_corr.svg"))
+
+
+
+
+
+
+windows(14,9)
+
+rna_cor1<-ggcorrplot(t(target_PCA$ind$coord[1:30,]), method="circle")
+
+ggsave(rna_cor1, file=file.path(pca_dir, "rna_cor1.svg"))
+
+
+
+rna_cor2<-ggcorrplot(t(target_PCA$ind$coord[31:60,]), method="circle")
+ggsave(rna_cor2, file=file.path(pca_dir, "rna_cor2.svg"))
+
+rna_cor3<-ggcorrplot(t(target_PCA$ind$coord[61:90,]), method="circle")
+
+ggsave(rna_cor3, file=file.path(pca_dir, "rna_cor3.svg"))
+
+rna_cor4<-ggcorrplot(t(target_PCA$ind$coord[91:118,]), method="circle")
+
+ggsave(rna_cor4, file=file.path(pca_dir, "rna_cor4.svg"))
+
+pheatmap<-pheatmap(target_PCA$var$cor)
+
+ggsave(pheatmap, file=file.path(pca_dir, "pheatmap.svg"))
+
+
+
+
+
+plot_pca_ind<-as.data.frame(target_PCA$ind$coord)
+plot_pca_ind$segment<- target_data@phenoData@data$segment
+
+
+segment<-"segment"
+
+p <- ggplot(data=plot_pca_ind, 
+            aes(x=plot_pca_ind[,1], y=plot_pca_ind[,3])) +
+geom_point( 
+  #need to change names of rows and color by the names
+  aes_string(color=segment,
+                        shape=segment), alpha=0.5, size=3) + 
+  labs(x=paste0("PCA 1 (", round(target_PCA$eig[1,2]), "%)"), 
+       y=paste0("PCA 2 (", round(target_PCA$eig[2,2]), "%)"),
+       title="PCA") +
+  theme_bw() + theme(legend.position = "right")
+
+
+
+p
+p
+}
+
+# else {
+#   
+#  ind_cor<-corrplot(target_PCA$ind$coord, is.corr = FALSE, tl.cex = 0.7)
+# 
+# png(height=5000, width = 5000, file="ind_cor.png", type= "cairo")
+# corrplot(t(target_PCA$ind$coord), is.corr = FALSE, tl.cex = 0.7)
+# dev.off()
+# 
+# 
+# 
+# quanti_cor<-corrplot(target_PCA$quanti.sup$cor, is.corr = TRUE)
+# 
+# png(height=1500, width = 1500, file="quanti_cor.png", type= "cairo")
+# corrplot(target_PCA$quanti.sup$cor, is.corr = TRUE, tl.cex = 0.7)
+# dev.off()
+# 
+# 
+# quali_cor<-corrplot(target_PCA$quali.sup$coord, is.corr = FALSE)
+# 
+# png(height=2000, width = 2000, file="quali_cor.png", type= "cairo", res = 200)
+# corrplot(target_PCA$quali.sup$coord[1:50,], is.corr = FALSE, tl.cex = 0.7)
+# dev.off()
+# 
+# 
+# 
+# 
+# plot_pca_ind<-as.data.frame(target_PCA$ind$coord)
+# plot_pca_ind$segment<- target_data@phenoData@data$segment
+# 
+# 
+# segment<-"segment"
+# 
+# p <- ggplot(data=plot_pca_ind, 
+#             aes(x=plot_pca_ind[,1], y=plot_pca_ind[,3])) +
+# geom_point( 
+#   #need to change names of rows and color by the names
+#   aes_string(color=segment,
+#                         shape=segment), alpha=0.5, size=3) + 
+#   labs(x=paste0("PCA 1 (", round(target_PCA$eig[1,2]), "%)"), 
+#        y=paste0("PCA 2 (", round(target_PCA$eig[2,2]), "%)"),
+#        title="PCA") +
+#   theme_bw() + theme(legend.position = "right")
+# 
+# 
+# 
+# p
+# p
+# 
+# }
+# 
+# 
+# }
+
+
+
+
+##########################     Deal with this later   #########################
+
+#plotting variable contribution
+
+
+# #Create circle of radius 1
+# circleFun <- function(center = c(0,0),diameter = 1, npoints = 100){
+#   r = diameter / 2
+#   tt <- seq(0,2*pi,length.out = npoints)
+#   xx <- center[1] + r * cos(tt)
+#   yy <- center[2] + r * sin(tt)
+#   return(data.frame(x = xx, y = yy))
+# }
+# 
+# circ <- circleFun(c(0,0),2,npoints = 500)
+# 
+# 
+# 
+# pca_var<- data.frame(target_PCA$quali.sup$coord)
+# 
+# vars.p <-  ggplot() +
+# 
+#                geom_path(data = circ,aes(x,y), lty = 2, color = "grey", alpha = 0.7) +
+#                 
+#                geom_hline(yintercept = 0, lty = 2, color = "grey", alpha = 0.9) +
+#                 
+#                geom_vline(xintercept = 0, lty = 2, color = "grey", alpha = 0.9) +
+# 
+#                geom_segment(data = pca_var, aes(x = 0, xend = Dim.1, y = 0, yend = Dim.2),
+#                             
+#                             arrow = arrow(length = unit(0.025, "npc"), type = "open"), 
+#                          
+#                             lwd = 1) + 
+#   
+#               geom_text(data = pca_var, 
+#                         
+#                         aes(x = Dim.1*1.15, y =  Dim.2*1.15, 
+#                             
+#                             label = c("Carat", "Depth", "Table", "Price", "X", "Y", "Z")), 
+#                         
+#                             check_overlap = F, size = 3) +
+#   
+#               xlab("PC 1") + 
+#   
+#               ylab("PC2") +
+#   
+#               coord_equal() +
+#               
+#               theme_minimal() +
+#               
+#               theme(panel.grid = element_blank(), 
+#               
+#                     panel.border = element_rect(fill= "transparent"))
+
+
+
+```
+
+
+
+
+
+Here we specify a function for Differential Expression via Linear Mixed Effects modeling, automated defining and export of excel sheet with DE genes, and Gene set enrichment 
+
+
+
+
+*****************************
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+run_DE <- function(object, pdat, elt = "exprs", modelFormula = NULL,
+                         groupVar = "group", nCores = 1, multiCore = TRUE,
+                         pAdjust = "BY", pairwise = TRUE) {
+  if (is.null(modelFormula)) {
+    modelFormula <- design(object)
+  }
+  mTerms <- all.vars(modelFormula)
+  if ("1" %in% mTerms) {
+    mTerms <- mTerms[which(!(mTerms %in% "1"))]
+  }
+  # check if groupVar is in model formula terms
+  if (!groupVar %in% mTerms){
+    stop ("Error: groupVar needs to be defined as fixed effect in the model.\n")
+  }
+  # check if terms in model are in sData
+  if (any(!mTerms %in% names(pdat))){
+    stop ("Error: Not all terms in the model formula are in pheno or protocol data.\n")
+  }
+  pDat <- pdat[,mTerms]
+  for (i in names(pDat))
+  {
+    if (inherits(i, "character")) {
+      pDat[, i] <- as.factor(pDat[, i])
+    }
+  }
+  if (nCores > 1) {
+    deFunc <- function(i, groupVar, pDat, modelFormula, exprs, pairwise = TRUE) {
+      dat <- data.frame(expr = exprs$exprs[i, ], pDat)
+      lmOut <- suppressWarnings(lmerTest::lmer(modelFormula, dat))
+      if(pairwise == FALSE) {
+        lsm <- lmerTest::ls_means(lmOut, which = groupVar, pairwise = FALSE)
+      } else {
+        lsm <- lmerTest::ls_means(lmOut, which = groupVar, pairwise = TRUE)
+      }
+      lmOut <- matrix(stats::anova(lmOut)[groupVar, "Pr(>F)"], ncol = 1, dimnames = list(groupVar, "Pr(>F)"))
+      lsmOut <- matrix(cbind(lsm[,"Estimate"], lsm[,"Pr(>|t|)"]), ncol = 2, dimnames = list(gsub(groupVar, "", rownames(lsm)), c("Estimate", "Pr(>|t|)")))
+      
+      return(list(anova = lmOut, lsmeans = lsmOut))
+    }
+    exprs <- new.env()
+    exprs$exprs <- object#assayDataElement(object, elt = elt)
+    if (multiCore & Sys.info()['sysname'] != "Windows") {
+      mixedOut <- parallel::mclapply(rownames(object), deFunc, groupVar, pDat, formula(paste("expr", as.character(modelFormula)[2], sep = " ~ ")), exprs, mc.cores = nCores)
+    }
+    else {
+      cl <- parallel::makeCluster(getOption("cl.cores", nCores))
+      mixedOut <- parallel::parLapply(cl, rownames(object), deFunc, groupVar, pDat, formula(paste("expr", as.character(modelFormula)[2], sep = " ~ ")), exprs, pairwise)
+      suppressWarnings(parallel::stopCluster(cl))
+    }
+    mixedOut <- rbind(array(lapply(mixedOut, function(x) x[["anova"]])),
+                      array(lapply(mixedOut, function(x) x[["lsmeans"]])))
+    colnames(mixedOut) <- rownames(object)
+    rownames(mixedOut) <- c("anova", "lsmeans")
+  }
+  else {
+    deFunc <- function(expr, groupVar, pDat, modelFormula, pairwise = TRUE) {
+      dat <- data.frame(expr = expr, pDat)
+      lmOut <- suppressMessages(lmerTest::lmer(modelFormula, dat))
+      if(pairwise == FALSE) {
+        lsm <- lmerTest::ls_means(lmOut, which = groupVar, pairwise = FALSE)
+      } else {
+        lsm <- lmerTest::ls_means(lmOut, which = groupVar, pairwise = TRUE)
+      }
+      lmOut <- matrix(stats::anova(lmOut)[groupVar, "Pr(>F)"], ncol = 1, dimnames = list(groupVar, "Pr(>F)"))
+      lsmOut <- matrix(cbind(lsm[,"Estimate"], lsm[,"Pr(>|t|)"]), ncol = 2, dimnames = list(gsub(groupVar, "", rownames(lsm)), c("Estimate", "Pr(>|t|)")))
+      
+      return(list(anova = lmOut, lsmeans = lsmOut))
+    }
+    mixedOut <- apply(object, 1, deFunc, groupVar, pDat, formula(paste("expr", as.character(modelFormula)[2], sep = " ~ ")), pairwise)
+  }
+  if (!is.null(pAdjust)) {
+    mixedOut["anova", ] <- p.adjust(mixedOut["anova", ], method = pAdjust)
+  }
+  return(mixedOut)
+}
+```
+
+
+
+```{r}
+
+geneSetAnalysis<- function(object,
+                                geneSet,
+                                elt = "exprs",
+                                minSize = 5,
+                                maxSize = 500,
+                                convertFrom = "SYMBOL",
+                                species = "Hs",
+                                db = "org.Hs.eg.db",
+                                zTransform = TRUE,
+                                GSVAmethod = "ssgsea",
+                                kcdfUsed = "Gaussian") {
+           ## 1. Check the input
+           # Check object
+           if(!class(object)[1] == "NanoStringGeoMxSet") {
+            stop("Please specify 'object' parameter as a GeoMxSetObject, currently not NanoString Object")
+           } else if(!featureType(object) == "Target") {
+            stop("Please use a target level GeoMxSetObject as the input 'object'")
+           }
+           # check geneSet directory for GMT files
+           if(!dir.exists(geneSet)) {
+            stop("geneSet directory provided does not exist, please provide a valid directory path")
+           } else if(length(dir(path = geneSet, pattern = '\\.gmt',
+                                ignore.case = TRUE,recursive = T)) == 0) {
+            stop("No GMT files were found in the location provided, please check the path and that gene set files are in .GMT format")
+           }
+           # Check elt
+           if(!inherits(elt, "character")) {
+            stop("Please specify 'elt' parameter as a assayDataElement in object")
+           } else if(!elt %in% assayDataElementNames(object)) {
+            stop("Please specify 'elt' parameter as a assayDataElement in object")
+           }
+           # The min/max sizes are provided as numeric
+           if(!inherits(minSize, "numeric") | !inherits(maxSize, "numeric")) {
+            stop("minSize & maxSize parameters must be numeric")
+           } else if(minSize < 0) {
+            stop("minSize may not be a negative number")
+           } else if(minSize >= maxSize) {
+            stop("minSize must be smaller than maxSize")
+           }
+           # The species is provided as Hs or Mm
+           if(!inherits(species, "character")) {
+            stop("species must be provided as a string")
+           } else if(!species %in% c("Hs", "Mm", "other")) {
+            stop("Please specify species as 'Hs', 'Mm', or 'other'")
+           } else if(species == "other" & !inherits(db, "character")) {
+            stop("Please ensure db is a character string the same title as an installed annotation database")
+           } else if(species == "other" & !db %in% installed.packages()) {
+            # Other & db are specified & db is an installed package
+            stop("Package defined by db was not found. Please install the annotation database (db) prior to running this function")
+           }
+           # The zTransform argument must be logical.
+           if(!inherits(zTransform, "logical")) {
+            stop("zTransform must be either: TRUE or FALSE")
+           }
+           # The GSVAmethod is a string and of a relevant type
+           if(!inherits(GSVAmethod, "character")) {
+            stop("GSVAmethod must be a string from the following list: 'ssgsea', 'gsva', 'zscore', 'plage'")
+           } else if(!GSVAmethod %in% c('ssgsea', 'gsva', 'zscore', 'plage')) {
+            stop("GSVAmethod must be one of the following: 'ssgsea', 'gsva', 'zscore', 'plage'")
+           }
+           # The kcdfUsed is a string and of a relevant type
+           if(!inherits(kcdfUsed, "character")) {
+            stop("GSVAmethod must be a string from the following list: 'Gaussian', 'Poisson', 'none'")
+           } else if(!kcdfUsed %in% c('Gaussian', 'Poisson', 'none')) {
+            stop("GSVAmethod must be one of the following: 'Gaussian', 'Poisson', 'none'")
+           }
+
+           ## 2. Read GMT files
+           gmts_loc <- dir(path = geneSet, pattern = '\\.gmt',
+                           ignore.case = TRUE, full.names = TRUE,recursive = T)
+           GMTs <- lapply(gmts_loc, function(gmt) {
+            GSEABase::getGmt(con = gmt)})
+           names(GMTs) <- dir(path = geneSet, pattern = '\\.gmt',
+                              ignore.case = TRUE, recursive = T)
+
+           ## load the annotation database (consider dropping import above later)
+           if(species == "Mm") {
+            db <- "org.Mm.eg.db"
+           }
+           require(db, character.only = TRUE)
+
+           # check that keys are from appropriate package
+           if(!convertFrom %in% AnnotationDbi::keytypes(eval(parse(text = db)))) {
+            stop("convertFrom must be provided as one of the key types supported by the specified annotation database (db). Please check AnnotationDbi::keytypes(<db>) for allowed entries")
+           }
+
+           ## 3. Convert GMT to list with appropriate symbols for matching with
+           #     the DSP IDs which default to gene names
+           GMT_sets <- convertGMTs(GMT = GMTs,
+                                   db = db,
+                                   convertFrom = convertFrom)
+
+           # check that some gene sets meet the criteria for scoring:
+           nGenes <- lapply(GMT_sets, function(x) {
+            lapply(x$mapped, function(y) {
+             sum(y %in% fData(object)$TargetName)
+            })
+           })
+
+           pass_sets <- lapply(nGenes, function(x) {any(x >= minSize & x <= maxSize)})
+           if(!any(unlist(pass_sets))) {
+            stop("No gene sets had enough coverage given the min & max genes required to move forward")
+           } else if(any(unlist(pass_sets) == FALSE)) {
+            offenders <- names(pass_sets)[unlist(pass_sets) == FALSE]
+            warning(paste0("Warning: Some files contained gene sets without enough coverage to move forward. Adjust minSize/maxSize or gene filtering criteria upstream of analysis. Gene set files/lists not scored: ",
+                           paste(offenders, collapse = ', ')))
+           }
+
+           ## 4. Score gene sets [need to apply over list of GMTs]
+           geneSetObj <- lapply(GMT_sets[unlist(pass_sets)],
+                                function(x) {
+                                 GSVA::gsva(expr = assayDataElement(object,
+                                                                    elt = elt),
+                                            gset.idx.list = x$mapped,
+                                            method = GSVAmethod,
+                                            min.sz = minSize,
+                                            max.sz = maxSize,
+                                            kcdf = kcdfUsed)
+                                })
+
+           ## 5. build new featureData for gene sets
+           for(i in names(geneSetObj)) {
+            # Identify the # and name of genes used for each gene set, for use
+            # downstream analysis / review of performance of gene sets
+            used_genes <- unlist(lapply(
+             GMT_sets[[i]]$mapped[rownames(geneSetObj[[i]])], function(x) {
+              sum(x %in% fData(object)$TargetName, na.rm = TRUE)
+             }))
+            used_names <- unlist(lapply(
+             GMT_sets[[i]]$mapped[rownames(geneSetObj[[i]])], function(x) {
+              paste(x[x %in% fData(object)$TargetName], collapse = ';')
+             }))
+            # build and iterate the feature data
+            if(i == names(geneSetObj)[1]) {
+             feat_data <- data.frame(row.names = rownames(geneSetObj[[i]]),
+                                     GeneSetID = paste0('GS0', 1:nrow(geneSetObj[[i]])),
+                                     GeneSet = rownames(geneSetObj[[i]]),
+                                     GeneSetSource = i,
+                                     PresentTargets = used_genes,
+                                     TargetIds = used_names)
+             gs_ct <- nrow(geneSetObj[[i]]) + 1 # save count for us in adding IDs below
+            } else {
+             feat_data <- rbind(feat_data,
+                                data.frame(row.names = rownames(geneSetObj[[i]]),
+                                     GeneSetID = paste0('GS0', gs_ct:(gs_ct + nrow(geneSetObj[[i]]) - 1)),
+                                     GeneSet = rownames(geneSetObj[[i]]),
+                                     GeneSetSource = i,
+                                     PresentTargets = used_genes,
+                                     TargetIds = used_names))
+             gs_ct <- nrow(geneSetObj[[i]]) + gs_ct # save count for us in adding IDs below
+            }
+           }
+
+           ## 6. Build ExpressionSet
+           #     Build GeoMxSet Object; check = FALSE used to override inherited
+           #     checks from NanoStringRccSet
+           geneSetObj <-
+            NanoStringGeoMxSet(assayData = do.call(rbind, geneSetObj),
+                               phenoData = AnnotatedDataFrame(pData(object)),
+                               protocolData = protocolData(object),
+                               featureData = AnnotatedDataFrame(feat_data),
+                               featureType = "GeneSet",
+                               check = FALSE)
+
+           ## 7. Z-transform the data.
+           if(zTransform) {
+            assayDataElement(geneSetObj, elt = GSVAmethod) <-
+             exprs(geneSetObj)
+            exprs(geneSetObj) <- t(esApply(geneSetObj, 1, scale))
+           }
+
+           # return new GeoMxSet object
+           return(geneSetObj)
+          }
+
+
+convertGMTs <- function(GMTs, db, convertFrom) {
+ if(convertFrom != "SYMBOL") {
+  # convert IDs to SYMBOL to start
+  GMT_sets <- list()
+  for(i in names(GMTs)) {
+   GMT_sets[[i]] <- convertSyms(geneList = geneIds(GMTs[[i]]),
+                                db = db,
+                                convertFrom = convertFrom)
+  }
+  GMT_sets <- removeEmptySets(GMT_sets)
+ } else {
+  # if no conversion necessary still reduce to mapped genes
+  GMT_sets <- list()
+  for(i in names(GMTs)) {
+   mapping <- lapply(geneIds(GMTs[[i]]), function(x) {
+    x[x %in% keys(eval(parse(text = db)), keytype = "SYMBOL")]})
+   GMT_sets[[i]] <- list(mapped = mapping)
+  }
+  GMT_sets <- removeEmptySets(GMT_sets)
+ }
+ return(GMT_sets)
+}
+
+# convertSyms takes a genelist and converts to mapped IDs & unmapped IDs
+convertSyms <- function(geneList, db, convertFrom) {
+ geneList_mapped <- lapply(geneList, function(gmt) {
+  if(any(gmt %in% keys(eval(parse(text = db)), convertFrom))) {
+   suppressMessages(mapIds(eval(parse(text = db)),
+                           gmt,
+                           column = "SYMBOL", keytype = convertFrom))
+  }
+ })
+ # keep all unmapped GMT IDs in seperate list
+ genesUnmapped <- lapply(geneList_mapped, function(gmt) {
+  names(gmt)[is.na(gmt)]
+ })
+ # add names of gene set back
+ names(genesUnmapped) <- names(geneList)
+ # remove unmapped genes
+ genesMapped <- lapply(geneList_mapped, function(gmt) {
+  gmt[!is.na(gmt)]
+ })
+ names(genesMapped) <- names(geneList)
+ return(list(mapped = genesMapped,
+             unmapped = genesUnmapped))
+}
+
+# Removes empty gene lists from the read GMT list
+removeEmptySets <- function(GMT_sets) {
+ set_size <- lapply(GMT_sets, function(x) {
+  lapply(x$mapped, function(y) {length(y)})})
+ for(i in names(GMT_sets)) {
+  if(any(set_size[[i]] == 0)) {
+   keep_sets <- names(set_size[[i]])[unlist(set_size[[i]]) > 0]
+   drop_sets <- names(set_size[[i]])[unlist(set_size[[i]]) == 0]
+   warning(paste0('Warning: Dropping gene sets from ',
+                  i,
+                  ' which were unable to be mapped prior to gene set analysis: ',
+                  paste(drop_sets, collapse = ', ')), immediate. = TRUE)
+   GMT_sets[[i]]$mapped <- GMT_sets[[i]]$mapped[keep_sets]
+  }
+ }
+ return(GMT_sets)
+}
+
+```
+
+
+
+
+``` {r} 
+getTopFeatures <- function(results,
+                        n_features = 10,
+                        est_thr = 0,
+                        fdr_thr = 0.05) {
+
+ # ################
+ # Check User Input
+ # ################
+
+ # Ensure the results input is a dataframe
+ if(!inherits(results, "data.frame")){
+  stop("Please check the input; input must be a data.frame.")
+ }
+
+ # Ensure that the required columns are present in the results dataframe
+ if(!("Feature" %in% colnames(results) & "Estimate" %in% colnames(results) & "FDR" %in% colnames(results) & "P" %in% colnames(results))){
+  stop('Please check the input dataframe; input dataframe does not contain the named columns expected.  \n')
+ }
+
+ # Ensure the n_features is a positive integer greater than 1
+ if(is.null(n_features)){
+     n_features = 10
+     warning("Your number of features was NULL; n_features will default to 10.")
+ }
+ if(!is.null(n_features)){
+  if (!inherits(n_features, "numeric")){
+   stop("Please check the number of features; n_features must be numeric.")
+  }
+  if (n_features %% 1 != 0){
+   stop("Please check the number of features; n_features must be an integer.")
+  }
+  if (n_features < 1){
+   stop("Please check the number of features; n_features must be >= 1.")
+  }
+ }
+
+ # Ensure that the estimate threshold is a number, 0 or greater
+ if(is.null(est_thr)){
+   est_thr = 0
+   warning("Your estimate threshold value was NULL; est_thr will default to 0.")
+ }
+ if(!is.null(est_thr)){
+  if (!inherits(est_thr, "numeric")){
+   stop("Please check the estimate threshold; est_thr must be numeric.")
+  }
+  if (est_thr < 0){
+   stop("Please check the estimate threshold; est_thr must be >= 0.")
+  }
+ }
+
+# Ensure that the FDR threshold is a number, 0 or greater
+ if(is.null(fdr_thr)){
+     fdr_thr = 0.05
+     warning("Your false discovery rate threshold value was NULL; fdr_thr will default to 0.05.")
+ }
+ if(!is.null(fdr_thr)){
+  if (!inherits(fdr_thr, "numeric")){
+   stop("Please check the false discovery rate threshold; fdr_thr must be numeric.")
+  }
+  if (fdr_thr < 0){
+   stop("Please check the false discovery rate threshold; fdr_thr must be >= 0.")
+  }
+ }
+
+ # ########
+ # Process
+ # ########
+
+ results$invert_P <- -log10(results$P) * sign(results$Estimate)
+
+ # Select top up-regulated features
+ results <- results[order(results$invert_P, decreasing = TRUE), ]
+ top_features <-
+  list(up = subset(results, FDR <= fdr_thr & Estimate > est_thr)[1:n_features, "Feature"])
+ top_features$up <- top_features$up[!is.na(top_features$up)]
+
+ # Select top down-regulated features
+ results <- results[order(results$invert_P, decreasing = FALSE), ]
+ top_features$down = subset(results, FDR <= fdr_thr & Estimate < -1*est_thr)[1:n_features, "Feature"]
+ top_features$down <- top_features$down[!is.na(top_features$down)]
+
+ # Select top up and down regulated features
+ top_features$all = c(top_features$up, rev(top_features$down))
+
+ # #######
+ # Return
+ # #######
+
+ return(top_features)
+}
+```
+
+```{r} 
+
+mixedDE <- function(object, pdat, elt = "exprs", modelFormula = NULL,
+                         groupVar = "group", nCores = 1, multiCore = TRUE,
+                         pAdjust = "BY", pairwise = TRUE) {
+  if (is.null(modelFormula)) {
+    modelFormula <- design(object)
+  }
+  mTerms <- all.vars(modelFormula)
+  if ("1" %in% mTerms) {
+    mTerms <- mTerms[which(!(mTerms %in% "1"))]
+  }
+  # check if groupVar is in model formula terms
+  if (!groupVar %in% mTerms){
+    stop ("Error: groupVar needs to be defined as fixed effect in the model.\n")
+  }
+  # check if terms in model are in sData
+  if (any(!mTerms %in% names(pdat))){
+    stop ("Error: Not all terms in the model formula are in pheno or protocol data.\n")
+  }
+  pDat <- pdat[,mTerms]
+  for (i in names(pDat))
+  {
+    if (inherits(i, "character")) {
+      pDat[, i] <- as.factor(pDat[, i])
+    }
+  }
+  if (nCores > 1) {
+    deFunc <- function(i, groupVar, pDat, modelFormula, exprs, pairwise = TRUE) {
+      dat <- data.frame(expr = exprs$exprs[i, ], pDat)
+      lmOut <- suppressWarnings(lmerTest::lmer(modelFormula, dat))
+      if(pairwise == FALSE) {
+        lsm <- lmerTest::ls_means(lmOut, which = groupVar, pairwise = FALSE)
+      } else {
+        lsm <- lmerTest::ls_means(lmOut, which = groupVar, pairwise = TRUE)
+      }
+      lmOut <- matrix(stats::anova(lmOut)[groupVar, "Pr(>F)"], ncol = 1, dimnames = list(groupVar, "Pr(>F)"))
+      lsmOut <- matrix(cbind(lsm[,"Estimate"], lsm[,"Pr(>|t|)"]), ncol = 2, dimnames = list(gsub(groupVar, "", rownames(lsm)), c("Estimate", "Pr(>|t|)")))
+      
+      return(list(anova = lmOut, lsmeans = lsmOut))
+    }
+    exprs <- new.env()
+    exprs$exprs <- object#assayDataElement(object, elt = elt)
+    if (multiCore & Sys.info()['sysname'] != "Windows") {
+      mixedOut <- parallel::mclapply(rownames(object), deFunc, groupVar, pDat, formula(paste("expr", as.character(modelFormula)[2], sep = " ~ ")), exprs, mc.cores = nCores)
+    }
+    else {
+      cl <- parallel::makeCluster(getOption("cl.cores", nCores))
+      mixedOut <- parallel::parLapply(cl, rownames(object), deFunc, groupVar, pDat, formula(paste("expr", as.character(modelFormula)[2], sep = " ~ ")), exprs, pairwise)
+      suppressWarnings(parallel::stopCluster(cl))
+    }
+    mixedOut <- rbind(array(lapply(mixedOut, function(x) x[["anova"]])),
+                      array(lapply(mixedOut, function(x) x[["lsmeans"]])))
+    colnames(mixedOut) <- rownames(object)
+    rownames(mixedOut) <- c("anova", "lsmeans")
+  }
+  else {
+    deFunc <- function(expr, groupVar, pDat, modelFormula, pairwise = TRUE) {
+      dat <- data.frame(expr = expr, pDat)
+      lmOut <- suppressMessages(lmerTest::lmer(modelFormula, dat))
+      if(pairwise == FALSE) {
+        lsm <- lmerTest::ls_means(lmOut, which = groupVar, pairwise = FALSE)
+      } else {
+        lsm <- lmerTest::ls_means(lmOut, which = groupVar, pairwise = TRUE)
+      }
+      lmOut <- matrix(stats::anova(lmOut)[groupVar, "Pr(>F)"], ncol = 1, dimnames = list(groupVar, "Pr(>F)"))
+      lsmOut <- matrix(cbind(lsm[,"Estimate"], lsm[,"Pr(>|t|)"]), ncol = 2, dimnames = list(gsub(groupVar, "", rownames(lsm)), c("Estimate", "Pr(>|t|)")))
+      
+      return(list(anova = lmOut, lsmeans = lsmOut))
+    }
+    mixedOut <- apply(object, 1, deFunc, groupVar, pDat, formula(paste("expr", as.character(modelFormula)[2], sep = " ~ ")), pairwise)
+  }
+  if (!is.null(pAdjust)) {
+    mixedOut["anova", ] <- p.adjust(mixedOut["anova", ], method = pAdjust)
+  }
+  return(mixedOut)
+}
+
+```
+
+
+
+
+Here we deploy a function for downsampling data. This will allow users to specifically look at their data the way they want to. If they are interested in looking at only data corresponding to a specific metadata, they can do so quickly and efficiently using this function then working through the rest of the pipeline. It is crucial this is performed following QC analysis as some segments will not make it through QC, but this will be missed if averaging happens with higher quality segments. 
+
+
+
+```{r}
+
+#get matrix that has average of each tissue for each unique area 
+
+
+
+
+downsample<- function( dat,
+                       elt_to_use,
+                       vars_of_interest
+                       
+    ) {
+  
+norm<-assayDataElement(dat, elt=elt_to_use)
+
+
+  list_of_lists <- list()
+for (i in 1:length(vars_of_interest)) {
+  name <- vars_of_interest[i]
+  list_of_lists <- append(list_of_lists,list(dat@phenoData@data[[name]]))
+  names(list_of_lists)[i] <- name
+}
+  
+  
+  
+largevec <- c()
+for (i in 1:length(list_of_lists[[1]])) {
+  col <- c()
+  for (j in 1:length(list_of_lists)) {
+    col <- c(col,list_of_lists[[j]][[i]])
+  }
+  largevec <- c(largevec,paste(col,collapse ="_"))
+}
+
+colnames(norm)<-largevec
+
+
+V_<-unique(colnames(norm))
+averages<-data.frame(norm[,1])
+averages <- averages[,-1]
+for(i in 1:length(V_)){
+  col<-data.frame(norm[,1])
+  col<- col[,-1]
+  for(j in 1:length(largevec)) {
+    thing1 <- V_[i]
+    thing2 <- largevec[j]
+    if (thing1==thing2) {
+      thing3 <- norm[,j]
+      col <- cbind(col,thing3)
+    }
+  }
+  averages[i] <- apply(col,1,mean)
+}
+colnames(averages) <- V_
+
+norm<- as.matrix(averages)
+
+}
+ 
+
+
+
+
+var_meta<- c("slide","Layer", "scan", "segment", "Region", "Case", "Group", "PMI", "AgeatDeath")
+
+
+downsample_meta<- function(dat, norm, meta_data){
+  
+test <- pData(target_data)[,meta_data]
+rows <- paste(test$Layer,test$segment,test$Case,sep="_")
+
+sub1 <- match(colnames(norm), rows)
+norm_pdat <- pData(target_data)[sub1,meta_data]
+}
+
+
+
+
+
+
+
+
+
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
