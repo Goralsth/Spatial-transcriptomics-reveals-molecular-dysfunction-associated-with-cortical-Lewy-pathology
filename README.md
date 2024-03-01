@@ -74,7 +74,7 @@ To these directories, add the matching code from this github repsitory. The GeoM
 To run GeoMx code: load in all the helper functions to your environment first from teh helper fufnctions code, then use the analysis pipeline to produce figures. 
 
 
-
+DOI for this code repository is 10.5281/zenodo.10732492
 
 
 
