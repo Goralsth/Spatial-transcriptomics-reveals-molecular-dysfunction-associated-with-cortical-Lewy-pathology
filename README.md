@@ -71,7 +71,7 @@ astats_3mon.rds
 
 To these directories, add the matching code from this github repsitory. The GeoMx files have an analysis and a matching helper function code while CosMx only has one file.
 
-To run GeoMx code: load in all the helper functions to your environment first from teh helper fufnctions code, then use the analysis pipeline to produce figures. 
+To run GeoMx code: load in all the helper functions to your environment first from the helper functions code, then use the analysis pipeline to produce figures. 
 
 
 DOI for this code repository is 10.5281/zenodo.10732492
